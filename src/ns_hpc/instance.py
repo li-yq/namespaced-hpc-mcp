@@ -1,75 +1,160 @@
+"""Instance lifecycle — directory management, metadata, audit logging."""
+from __future__ import annotations
+
 import json
 import shutil
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from ns_hpc.config import Config
 
 
 class Instance:
+    """A sandbox instance tied to a persistent workspace directory.
+
+    Instances are stateless in the bwrap sense (no persistent namespace) but
+    maintain a workspace directory, audit log, output files, and metadata
+    on the host.
+    """
+
     def __init__(self, instance_id: str, base_dir: Path) -> None:
         self.id = instance_id
         self.base_dir = base_dir
         self.workspace_dir = base_dir / "workspace"
         self.audit_log_path = base_dir / "audit.log"
         self.metadata_path = base_dir / "metadata.json"
+        self.output_dir = base_dir / "output"
 
     @property
     def exists(self) -> bool:
         return self.base_dir.exists()
 
-    @staticmethod
-    def create(instance_id: str, config: Config) -> "Instance":
-        base_dir = config.resolve_instances_dir() / instance_id
-        instance = Instance(instance_id, base_dir)
+    # ── Lifecycle ────────────────────────────────────────────────────────
 
-        instance.base_dir.mkdir(parents=True, exist_ok=True)
-        instance.workspace_dir.mkdir(parents=True, exist_ok=True)
+    @staticmethod
+    def create(instance_id: str, config: Config) -> Instance:
+        """Create a new instance directory structure.
+
+        Raises FileExistsError if the instance already exists.
+
+        Args:
+            instance_id: Unique instance identifier.
+            config: Loaded ns-hpc configuration.
+
+        Returns:
+            New Instance object.
+        """
+        instances_dir = config.resolve_instances_dir()
+        base_dir = instances_dir / instance_id
+
+        if base_dir.exists():
+            raise FileExistsError(f"Instance {instance_id} already exists at {base_dir}")
+
+        base_dir.mkdir(parents=True, exist_ok=True)
+        (base_dir / "workspace").mkdir(parents=True, exist_ok=True)
+        (base_dir / "output").mkdir(parents=True, exist_ok=True)
 
         metadata = {
             "id": instance_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "workspace": str(instance.workspace_dir),
+            "workspace": str(base_dir / "workspace"),
             "hostname": __import__("socket").gethostname(),
         }
-        instance.metadata_path.write_text(json.dumps(metadata, indent=2))
+        (base_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
 
-        return instance
+        return Instance(instance_id, base_dir)
 
     @staticmethod
-    def load(instance_id: str, config: Config) -> "Instance | None":
+    def load(instance_id: str, config: Config) -> Optional[Instance]:
+        """Load an existing instance by ID. Returns None if not found."""
         base_dir = config.resolve_instances_dir() / instance_id
         instance = Instance(instance_id, base_dir)
         if not instance.metadata_path.exists():
             return None
         return instance
 
-    def write_audit(self, command: str, result: dict) -> None:
-        entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "command": command,
-            "exit_code": result.get("exit_code"),
-            "stdout_len": len(result.get("stdout", "")),
-            "stderr_len": len(result.get("stderr", "")),
-        }
-        with open(self.audit_log_path, "a") as f:
-            f.write(json.dumps(entry) + "\n")
-
     @staticmethod
-    def list_instances(config: Config) -> list["Instance"]:
+    def list_instances(config: Config) -> list[Instance]:
+        """List all existing instances sorted by creation time."""
         instances_dir = config.resolve_instances_dir()
         if not instances_dir.exists():
             return []
         result: list[Instance] = []
-        for child in instances_dir.iterdir():
+        for child in sorted(instances_dir.iterdir()):
             if child.is_dir() and (child / "metadata.json").exists():
                 result.append(Instance(child.name, child))
         return result
 
     @staticmethod
     def destroy(instance_id: str, config: Config) -> bool:
+        """Remove an instance directory and all its contents."""
         base_dir = config.resolve_instances_dir() / instance_id
         if not base_dir.exists():
             return False
         shutil.rmtree(base_dir)
         return True
+
+    # ── Audit logging ────────────────────────────────────────────────────
+
+    def _ensure_output_dir(self) -> Path:
+        """Create the output directory if it doesn't exist."""
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        return self.output_dir
+
+    def audit_start(self, task_id: str, command: str) -> tuple[Path, Path]:
+        """Record command start and prepare output file paths.
+
+        Args:
+            task_id: Unique identifier for this command execution.
+            command: The shell command being executed.
+
+        Returns:
+            Tuple of (stdout_path, stderr_path) for the output files.
+        """
+        self._ensure_output_dir()
+        stdout_path = self.output_dir / f"{task_id}.out"
+        stderr_path = self.output_dir / f"{task_id}.err"
+
+        entry = {
+            "event": "start",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "task_id": task_id,
+            "command": command,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+        }
+        with open(self.audit_log_path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+
+        return stdout_path, stderr_path
+
+    def audit_finish(self, task_id: str, exit_code: int) -> None:
+        """Record command completion.
+
+        Args:
+            task_id: The task ID from the matching audit_start call.
+            exit_code: Exit code of the command.
+        """
+        entry = {
+            "event": "finish",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "task_id": task_id,
+            "exit_code": exit_code,
+        }
+        with open(self.audit_log_path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+
+    def write_audit(self, command: str, result: dict) -> None:
+        """Legacy one-shot audit entry (start + finish combined).
+
+        Prefer audit_start/audit_finish for longer-running commands.
+        """
+        task_id = uuid.uuid4().hex[:12]
+        self.audit_start(task_id, command)
+        self.audit_finish(task_id, result.get("exit_code", -1))
+
+    def gen_task_id(self) -> str:
+        """Generate a short unique task ID."""
+        return uuid.uuid4().hex[:12]

@@ -1,6 +1,7 @@
 """MCP server for ns-hpc — sandboxed command execution and instance management."""
 from __future__ import annotations
 
+import json
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -82,9 +83,14 @@ async def list_instances(input: ListInstancesInput) -> str:
     if not instances:
         return "No instances found."
 
-    lines = [f"Found {len(instances)} instance(s):"]
+    lines = []
     for inst in instances:
-        lines.append(f"  - {inst.id}  ({inst.workspace_dir})")
+        try:
+            meta = json.loads(inst.metadata_path.read_text())
+            created = meta.get("created_at", "unknown")[:19]
+        except Exception:
+            created = "unknown"
+        lines.append(f"{inst.id:20s}  created: {created}")
 
     return "\n".join(lines)
 
@@ -157,12 +163,11 @@ async def run_command(input: RunCommandInput) -> str:
         config=cfg,
     )
 
-    # Audit from host side — critical security boundary
-    instance.write_audit(input.command, {
-        "exit_code": result.exit_code,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-    })
+    task_id = instance.gen_task_id()
+    stdout_path, stderr_path = instance.audit_start(task_id, input.command)
+    instance.audit_finish(task_id, result.exit_code)
+    stdout_path.write_text(result.stdout or "")
+    stderr_path.write_text(result.stderr or "")
 
     output = f"Exit code: {result.exit_code}\n"
     if result.stdout:

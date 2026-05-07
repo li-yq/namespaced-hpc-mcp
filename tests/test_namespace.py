@@ -130,7 +130,7 @@ def test_run_in_sandbox_isolation():
 def test_run_in_sandbox_timeout():
     with tempfile.TemporaryDirectory() as tmpdir:
         result = run_in_sandbox(
-            command=["sleep", "100"],
+            command=["sleep", "10"],
             workspace_host_path=tmpdir,
             timeout=2,
         )

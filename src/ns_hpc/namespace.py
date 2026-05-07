@@ -104,9 +104,19 @@ def run_in_sandbox(
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired:
+            # bwrap runs as PID 1 in its own PID namespace and ignores
+            # SIGTERM; SIGKILL is required.  The inner command may still
+            # hold the pipe fds open, so don't wait for communicate to
+            # finish — just reap and return what we have.
             proc.kill()
-            proc.communicate()
-            os.close(r_fd)
+            try:
+                proc.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.wait()
+            try:
+                os.close(r_fd)
+            except OSError:
+                pass
             return SandboxResult(exit_code=-1, stdout="", stderr="", sandbox_ok=False)
 
         # Read JSON status from the pipe

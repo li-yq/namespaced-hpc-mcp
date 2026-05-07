@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 
@@ -9,6 +10,11 @@ from ns_hpc.instance import Instance
 from ns_hpc.namespace import build_bwrap_args, run_in_sandbox
 
 app = typer.Typer()
+instance_app = typer.Typer()
+app.add_typer(instance_app, name="instance", help="Manage sandbox instances.")
+
+
+# ── Top-level commands ────────────────────────────────────────────────────
 
 
 @app.command()
@@ -22,29 +28,66 @@ def run(
 
 
 @app.command()
-def enter(
-    instance_id: str = typer.Argument(help="Instance ID to enter"),
-):
-    """Start an interactive bash shell inside a sandbox instance."""
-    cfg = load_config()
-    inst = Instance.load(instance_id, cfg) or Instance.create(instance_id, cfg)
-
-    argv = build_bwrap_args(
-        command=["/bin/bash", "-i"],
-        workspace_host_path=str(inst.workspace_dir),
-        config=cfg,
-    )
-    os.execvp("bwrap", argv)
+def doctor():
+    """Run system diagnostics."""
+    run_doctor()
 
 
 @app.command()
+def clean(
+    days: int = typer.Option(7, "--days", "-d", help="Remove instances older than N days"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompt"),
+):
+    """Remove stale instances."""
+    clean_instances(days, force)
+
+
+# ── Instance subcommands ─────────────────────────────────────────────────
+
+
+@instance_app.command(name="list")
+def list_cmd():
+    """List all sandbox instances."""
+    cfg = load_config()
+    instances = Instance.list_instances(cfg)
+
+    if not instances:
+        print("No instances found.")
+        raise typer.Exit()
+
+    for inst in instances:
+        meta = json.loads(inst.metadata_path.read_text())
+        created = meta.get("created_at", "unknown")
+        print(f"{inst.id:20s}  created: {created}")
+
+
+@instance_app.command()
+def create(
+    instance_id: str = typer.Argument(help="Unique instance identifier"),
+):
+    """Create a new sandbox instance."""
+    cfg = load_config()
+    try:
+        inst = Instance.create(instance_id, cfg)
+    except FileExistsError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(code=1)
+
+    print(f"Created instance '{inst.id}' at {inst.base_dir}")
+
+
+@instance_app.command()
 def exec(
     instance_id: str = typer.Argument(help="Instance ID"),
     command: list[str] = typer.Argument(help="Command and arguments to run"),
 ):
-    """Run a command in a sandbox instance."""
+    """Run a command in an existing sandbox instance."""
     cfg = load_config()
-    inst = Instance.load(instance_id, cfg) or Instance.create(instance_id, cfg)
+    inst = Instance.load(instance_id, cfg)
+
+    if inst is None:
+        print(f"Error: instance '{instance_id}' not found.", file=sys.stderr)
+        raise typer.Exit(code=1)
 
     result = run_in_sandbox(
         command=command,
@@ -64,18 +107,3 @@ def exec(
     })
 
     raise typer.Exit(code=result.exit_code)
-
-
-@app.command()
-def doctor():
-    """Run system diagnostics."""
-    run_doctor()
-
-
-@app.command()
-def clean(
-    days: int = typer.Option(7, "--days", "-d", help="Remove instances older than N days"),
-    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompt"),
-):
-    """Remove stale instances."""
-    clean_instances(days, force)

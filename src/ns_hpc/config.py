@@ -18,8 +18,8 @@ class ProxiedMCP(BaseModel):
 
 
 class ResourceDefaults(BaseModel):
-    context_dirs: list[str]
-    resource_patterns: list[str]
+    context_dirs: list[str] = ["config/context"]
+    resource_patterns: list[str] = ["*.md"]
 
 
 class Config(BaseModel):
@@ -41,7 +41,7 @@ def _default_config() -> Config:
         ),
         proxied_mcps={},
         resource_defaults=ResourceDefaults(
-            context_dirs=["context"],
+            context_dirs=["config/context"],
             resource_patterns=["*.md"],
         ),
     )
@@ -49,7 +49,7 @@ def _default_config() -> Config:
 
 def load_config(path: str | Path | None = None) -> Config:
     if path is None:
-        path = os.environ.get("NS_HPC_CONFIG", "config.toml")
+        path = os.environ.get("NS_HPC_CONFIG", "config/config.toml")
     path = Path(path)
     if not path.exists():
         return _default_config()

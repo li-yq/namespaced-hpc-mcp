@@ -15,7 +15,7 @@ def test_default_config():
     assert cfg.namespace_defaults.workspace_mount == "/workspace"
     assert "--share-net" in cfg.namespace_defaults.flags
     assert cfg.proxied_mcps == {}
-    assert cfg.resource_defaults.context_dirs == ["context"]
+    assert cfg.resource_defaults.context_dirs == ["config/context"]
     assert cfg.resource_defaults.resource_patterns == ["*.md"]
 
 

@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from ns_hpc.config import Config, load_config
 from ns_hpc.instance import Instance
-from ns_hpc.namespace import run_in_sandbox
+from ns_hpc.job_manager import JobManager, JobStatus
 
 
 @dataclass
@@ -116,63 +116,166 @@ async def destroy_instance(input: DestroyInstanceInput) -> str:
     return f"Instance '{input.instance_id}' destroyed."
 
 
-# ── Command execution ──────────────────────────────────────────────────────
+# ── Job execution ─────────────────────────────────────────────────────────
 
 
-class RunCommandInput(BaseModel):
-    """Input for the run_command tool."""
-    command: str = Field(
-        ...,
-        description="Shell command to run inside the bwrap sandbox",
-    )
-    instance_id: str = Field(
-        ...,
-        description="Instance ID to run the command in",
+class SubmitJobInput(BaseModel):
+    instance_id: str = Field(..., description="Existing instance ID")
+    command: str = Field(..., description="Shell command to run")
+    mode: str = Field(
+        default="local",
+        description="Execution mode: 'local' (bwrap) or 'slurm' (sbatch)",
     )
     timeout: int = Field(
         default=60,
-        description="Max execution time in seconds",
+        description="Max seconds to wait for completion",
         ge=1,
-        le=3600,
+        le=86400,
+    )
+    detach: bool = Field(
+        default=False,
+        description="If True, keep job running past timeout instead of killing",
+    )
+    tail: int = Field(
+        default=50,
+        description="Number of tail lines to return from output",
+        ge=0,
+        le=1000,
     )
 
 
 @mcp.tool()
-async def run_command(input: RunCommandInput) -> str:
-    """Execute a shell command inside a bwrap-sandboxed environment.
+async def submit_job(input: SubmitJobInput) -> str:
+    """Submit a command as an async job.
 
-    The command runs in a fresh sandbox with:
-    - Read-only system paths (/usr, /lib, /bin, /etc)
-    - Read-write workspace directory
-    - Network access (--share-net)
-    - No access to host filesystem outside workspace
-    - /tmp as tmpfs, /proc and /dev available
+    The job runs inside a bwrap sandbox.  stdout/stderr are written
+    directly to disk files.  The tool waits up to ``timeout`` seconds,
+    then either returns the result (completed) or a running state.
+
+    When ``detach=False`` (default): if the job exceeds timeout, it is
+    killed and partial output is returned.
+
+    When ``detach=True``: if the job exceeds timeout, it keeps running
+    in the background.  Use ``poll_job`` to check on it later.
     """
     ctx = mcp.get_context()
-    context: ServerContext = ctx.lifespan_context
-    cfg = context.config
+    config: Config = ctx.lifespan_context.config
 
-    instance = Instance.load(input.instance_id, cfg)
+    instance = Instance.load(input.instance_id, config)
     if instance is None:
-        return f"Error: Instance '{input.instance_id}' not found"
+        return json.dumps({"error": f"Instance '{input.instance_id}' not found"})
 
-    result = run_in_sandbox(
-        command=["/bin/sh", "-c", input.command],
-        workspace_host_path=str(instance.workspace_dir),
+    mgr = JobManager(instance, config)
+    result = mgr.submit(
+        input.command,
+        mode=input.mode,
         timeout=input.timeout,
-        config=cfg,
+        tail=input.tail,
     )
 
-    instance.audit(input.command, result.exit_code,
-                   stdout=result.stdout, stderr=result.stderr)
+    # Handle detach: if still running after timeout, keep it running
+    if result.status == JobStatus.RUNNING and not input.detach:
+        mgr.cancel(result.job_id)
+        # Re-read tail after kill
+        from ns_hpc.job_manager import _tail_file
+        from pathlib import Path
+        result.stdout_tail = _tail_file(Path(result.stdout_path), input.tail)
+        result.stderr_tail = _tail_file(Path(result.stderr_path), input.tail)
+        result.status = JobStatus.TIMEOUT
 
-    output = f"Exit code: {result.exit_code}\n"
-    if result.stdout:
-        output += f"STDOUT:\n{result.stdout}\n"
-    if result.stderr:
-        output += f"STDERR:\n{result.stderr}\n"
+    return json.dumps(result.to_dict(), indent=2)
 
-    return output
+
+class PollJobInput(BaseModel):
+    instance_id: str = Field(..., description="Instance ID")
+    job_id: str = Field(..., description="Job ID to poll")
+    timeout: int = Field(
+        default=0,
+        description="Seconds to wait for completion (0 = just peek)",
+        ge=0,
+        le=3600,
+    )
+    detach: bool = Field(
+        default=False,
+        description="If True and job still running after timeout, keep it",
+    )
+    tail: int = Field(
+        default=50,
+        description="Number of tail lines to return",
+        ge=0,
+        le=1000,
+    )
+
+
+@mcp.tool()
+async def poll_job(input: PollJobInput) -> str:
+    """Poll a running job.  Optionally wait for completion.
+
+    Same timeout/detach semantics as submit_job.
+    """
+    ctx = mcp.get_context()
+    config: Config = ctx.lifespan_context.config
+
+    instance = Instance.load(input.instance_id, config)
+    if instance is None:
+        return json.dumps({"error": f"Instance '{input.instance_id}' not found"})
+
+    mgr = JobManager(instance, config)
+    result = mgr.poll(input.job_id, timeout=input.timeout, tail=input.tail)
+
+    if result is None:
+        return json.dumps({"error": f"Job '{input.job_id}' not found or already finished"})
+
+    if result.status == JobStatus.RUNNING and not input.detach:
+        mgr.cancel(result.job_id)
+        from ns_hpc.job_manager import _tail_file
+        from pathlib import Path
+        result.stdout_tail = _tail_file(Path(result.stdout_path), input.tail)
+        result.stderr_tail = _tail_file(Path(result.stderr_path), input.tail)
+        result.status = JobStatus.TIMEOUT
+
+    return json.dumps(result.to_dict(), indent=2)
+
+
+class ListJobsInput(BaseModel):
+    instance_id: str = Field(..., description="Instance ID")
+
+
+@mcp.tool()
+async def list_jobs(input: ListJobsInput) -> str:
+    """List all tracked jobs for an instance."""
+    ctx = mcp.get_context()
+    config: Config = ctx.lifespan_context.config
+
+    instance = Instance.load(input.instance_id, config)
+    if instance is None:
+        return json.dumps({"error": f"Instance '{input.instance_id}' not found"})
+
+    mgr = JobManager(instance, config)
+    jobs = mgr.list_jobs()
+    if not jobs:
+        return json.dumps([])
+    return json.dumps(jobs, indent=2)
+
+
+class CancelJobInput(BaseModel):
+    instance_id: str = Field(..., description="Instance ID")
+    job_id: str = Field(..., description="Job ID to cancel")
+
+
+@mcp.tool()
+async def cancel_job(input: CancelJobInput) -> str:
+    """Cancel a running job."""
+    ctx = mcp.get_context()
+    config: Config = ctx.lifespan_context.config
+
+    instance = Instance.load(input.instance_id, config)
+    if instance is None:
+        return json.dumps({"error": f"Instance '{input.instance_id}' not found"})
+
+    mgr = JobManager(instance, config)
+    ok = mgr.cancel(input.job_id)
+    return json.dumps({"job_id": input.job_id, "cancelled": ok})
 
 
 # ── Entry point ────────────────────────────────────────────────────────────

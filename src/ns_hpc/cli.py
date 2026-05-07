@@ -89,20 +89,14 @@ def exec(
         print(f"Error: instance '{instance_id}' not found.", file=sys.stderr)
         raise typer.Exit(code=1)
 
-    task_id = inst.gen_task_id()
-    stdout_path, stderr_path = inst.audit_start(task_id, " ".join(command))
-
     result = run_in_sandbox(
         command=command,
         workspace_host_path=str(inst.workspace_dir),
         config=cfg,
     )
 
-    inst.audit_finish(task_id, result.exit_code)
-
-    # Write output to separate files for non-interactive access
-    stdout_path.write_text(result.stdout or "")
-    stderr_path.write_text(result.stderr or "")
+    inst.audit(" ".join(command), result.exit_code,
+               stdout=result.stdout, stderr=result.stderr)
 
     if result.stdout:
         sys.stdout.write(result.stdout)

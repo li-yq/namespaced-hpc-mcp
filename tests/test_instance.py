@@ -56,26 +56,24 @@ def test_load_nonexistent():
     assert inst is None
 
 
-def test_audit_start_finish():
+def test_audit():
     cfg = _config()
     inst = Instance.create("test-003", cfg)
-    stdout_path, stderr_path = inst.audit_start("task-1", "echo hello")
-    assert stdout_path.parent == inst.output_dir
-    assert stdout_path.name == "task-1.out"
-    assert stderr_path.name == "task-1.err"
-    inst.audit_finish("task-1", 0)
-
+    task_id = inst.audit("echo hello", 0, stdout="hello\n", stderr="")
+    assert task_id is not None
+    assert len(task_id) == 12
+    # Output files created
+    out_file = inst.output_dir / f"{task_id}.out"
+    err_file = inst.output_dir / f"{task_id}.err"
+    assert out_file.read_text() == "hello\n"
+    assert err_file.read_text() == ""
+    # Audit log written
     log = inst.audit_log_path.read_text()
-    lines = log.strip().split("\n")
-    assert len(lines) == 2
-    start = json.loads(lines[0])
-    finish = json.loads(lines[1])
-    assert start["event"] == "start"
-    assert start["task_id"] == "task-1"
-    assert start["command"] == "echo hello"
-    assert finish["event"] == "finish"
-    assert finish["task_id"] == "task-1"
-    assert finish["exit_code"] == 0
+    entry = json.loads(log.strip())
+    assert entry["task_id"] == task_id
+    assert entry["command"] == "echo hello"
+    assert entry["exit_code"] == 0
+    assert entry["stdout_len"] == 6
 
 
 def test_legacy_write_audit():
@@ -84,7 +82,10 @@ def test_legacy_write_audit():
     inst.write_audit("ls -la", {"exit_code": 0, "stdout": "file1", "stderr": ""})
     log = inst.audit_log_path.read_text()
     lines = log.strip().split("\n")
-    assert len(lines) == 2  # start + finish
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["command"] == "ls -la"
+    assert entry["exit_code"] == 0
 
 
 def test_destroy_instance():

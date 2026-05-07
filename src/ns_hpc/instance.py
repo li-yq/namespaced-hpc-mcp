@@ -103,58 +103,44 @@ class Instance:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         return self.output_dir
 
-    def audit_start(self, task_id: str, command: str) -> tuple[Path, Path]:
-        """Record command start and prepare output file paths.
+    def audit(self, command: str, exit_code: int,
+              stdout: str = "", stderr: str = "") -> str:
+        """Record a command execution: write output files and log entry.
+
+        Creates a unique task ID, writes stdout/stderr to
+        ``{output_dir}/{task_id}.{out,err}``, and appends a JSON line to
+        the audit log containing all metadata.
 
         Args:
-            task_id: Unique identifier for this command execution.
-            command: The shell command being executed.
+            command: The shell command that was executed.
+            exit_code: The command's exit code.
+            stdout: Standard output text.
+            stderr: Standard error text.
 
         Returns:
-            Tuple of (stdout_path, stderr_path) for the output files.
-        """
-        self._ensure_output_dir()
-        stdout_path = self.output_dir / f"{task_id}.out"
-        stderr_path = self.output_dir / f"{task_id}.err"
-
-        entry = {
-            "event": "start",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "task_id": task_id,
-            "command": command,
-            "stdout_path": str(stdout_path),
-            "stderr_path": str(stderr_path),
-        }
-        with open(self.audit_log_path, "a") as f:
-            f.write(json.dumps(entry) + "\n")
-
-        return stdout_path, stderr_path
-
-    def audit_finish(self, task_id: str, exit_code: int) -> None:
-        """Record command completion.
-
-        Args:
-            task_id: The task ID from the matching audit_start call.
-            exit_code: Exit code of the command.
-        """
-        entry = {
-            "event": "finish",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "task_id": task_id,
-            "exit_code": exit_code,
-        }
-        with open(self.audit_log_path, "a") as f:
-            f.write(json.dumps(entry) + "\n")
-
-    def write_audit(self, command: str, result: dict) -> None:
-        """Legacy one-shot audit entry (start + finish combined).
-
-        Prefer audit_start/audit_finish for longer-running commands.
+            The generated task ID.
         """
         task_id = uuid.uuid4().hex[:12]
-        self.audit_start(task_id, command)
-        self.audit_finish(task_id, result.get("exit_code", -1))
+        self._ensure_output_dir()
+        (self.output_dir / f"{task_id}.out").write_text(stdout or "")
+        (self.output_dir / f"{task_id}.err").write_text(stderr or "")
 
-    def gen_task_id(self) -> str:
-        """Generate a short unique task ID."""
-        return uuid.uuid4().hex[:12]
+        entry = {
+            "task_id": task_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "command": command,
+            "exit_code": exit_code,
+            "stdout_path": str(self.output_dir / f"{task_id}.out"),
+            "stderr_path": str(self.output_dir / f"{task_id}.err"),
+            "stdout_len": len(stdout or ""),
+            "stderr_len": len(stderr or ""),
+        }
+        with open(self.audit_log_path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+
+        return task_id
+
+    def write_audit(self, command: str, result: dict) -> None:
+        """Legacy wrapper for backward compatibility."""
+        self.audit(command, result.get("exit_code", -1),
+                   result.get("stdout", ""), result.get("stderr", ""))

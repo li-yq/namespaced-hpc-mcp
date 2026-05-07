@@ -163,11 +163,8 @@ async def run_command(input: RunCommandInput) -> str:
         config=cfg,
     )
 
-    task_id = instance.gen_task_id()
-    stdout_path, stderr_path = instance.audit_start(task_id, input.command)
-    instance.audit_finish(task_id, result.exit_code)
-    stdout_path.write_text(result.stdout or "")
-    stderr_path.write_text(result.stderr or "")
+    instance.audit(input.command, result.exit_code,
+                   stdout=result.stdout, stderr=result.stderr)
 
     output = f"Exit code: {result.exit_code}\n"
     if result.stdout:

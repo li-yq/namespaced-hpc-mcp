@@ -2,77 +2,96 @@
 
 ## Overview
 
-This document describes how to set up a Slurm test cluster for developing and
-testing ns-hpc's Slurm task engine. The cluster runs in containers via podman.
+A local Slurm cluster for testing ns-hpc's Slurm task engine, running in
+rootful podman containers.
 
-## Running the Cluster
-
-A setup script is provided to start the cluster:
+## Quick Start
 
 ```bash
-cd /home/liyq/workspace/slurm-docker-cluster
-bash setup-slurm-cluster.sh
+cd /home/liyq/workspace/ns-hpc-mcp
+./scripts/slurm-cluster.sh start   # Start the cluster
+./scripts/slurm-cluster.sh stop    # Stop the cluster
+./scripts/slurm-cluster.sh status  # Check status
 ```
 
-## Current Status
-
-### Running containers (May 7, 2026):
+## Current Status (May 7, 2026)
 
 | Container | Status | Notes |
 |-----------|--------|-------|
-| mysql     | Up     | MariaDB 12, serves as Slurm accounting DB |
+| mysql     | Up     | MariaDB 12, Slurm accounting DB |
 | slurmdbd  | Up     | Slurm Database Daemon |
-| slurmctld | Up     | Slurm Controller (head node) |
+| slurmctld | Up     | Slurm Controller |
+| cpu-worker| Up     | 1 compute node (`c1`, idle) |
 
-### Worker node (cpu-worker)
-
-Dynamic node registration (slurmd -Z) fails under rootless podman because
-Slurm 25.11's cgroup/v2 plugin requires dbus/systemd for slurmstepd scope
-management, which isn't available inside the container.
-
-**Current workaround:** Run slurmd inside the slurmctld container (same PID
-and cgroup namespace):
-
-```bash
-podman exec slurmctld bash -c '
-  # Start munged if not running
-  gosu munge /usr/sbin/munged
-
-  # Add static node
-  sed -i "/^NodeName=/d" /etc/slurm/slurm.conf
-  echo "NodeName=localhost NodeAddr=127.0.0.1 CPUs=4 RealMemory=4000 State=UNKNOWN" >> /etc/slurm/slurm.conf
-  scontrol reconfigure
-
-  # Start slurmd
-  gosu slurm /usr/sbin/slurmd -Z -Dvvv --conf "Feature=cpu"
-'
-```
+The cluster uses rootful podman (`sudo podman`). The worker runs slurmd
+as root inside the container to bypass cgroup v2 permission issues with
+Slurm 25.11's systemd scope management.
 
 ## Usage
 
-### Check cluster status
-
 ```bash
-podman exec slurmctld sinfo
+# Check cluster status
+sudo podman exec slurmctld sinfo
+# Output: cpu* idle 1 c1
+
+# Submit a test job
+sudo podman exec slurmctld sbatch --wrap="echo 'Hello from ns-hpc'"
+
+# Check job status
+sudo podman exec slurmctld sacct --format=JobID,State,ExitCode,NodeList
+
+# Clean up
+sudo podman exec slurmctld scancel -u root
 ```
 
-### Submit a test job
+## Architecture
 
-```bash
-podman exec slurmctld sbatch --wrap="echo 'Hello from Slurm'"
-podman exec slurmctld squeue
+```
+┌─────────────────────────────────────────────────┐
+│ slurm-network (bridge)                           │
+│                                                   │
+│  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
+│  │  mysql    │  │ slurmdbd │  │  slurmctld    │  │
+│  │  :3306   │←─│  :6819   │←─│  :6817        │  │
+│  └──────────┘  └──────────┘  └───────┬───────┘  │
+│                                       │           │
+│                                ┌──────▼───────┐  │
+│                                │  cpu-worker  │  │
+│                                │  slurmd -Z   │  │
+│                                │  "c1" idle   │  │
+│                                └──────────────┘  │
+└─────────────────────────────────────────────────┘
 ```
 
-## Limitations
+## Ports
 
-- Dynamic node registration doesn't work with rootless podman + cgroup v2
-- Only one node (slurmctld itself) is available for job execution
-- GPU workers not configured
+| Port | Service | Host |
+|------|---------|------|
+| 3022 | SSH     | No (SSH_ENABLE=false) |
+| 6817 | slurmctld | Container only |
+| 6818 | slurmd | Container only |
+| 6819 | slurmdbd | Container only |
+
+## Implementation Note
+
+The worker runs slurmd as root (not `gosu slurm`) because Slurm 25.11's
+cgroup/v2 plugin needs to create cgroup directories under
+`/sys/fs/cgroup/machine.slice/`, which requires root access even with
+`--cgroupns=host` and writable cgroup bind mount.
+
+Run command used:
+```bash
+--entrypoint /bin/bash -c '
+  gosu munge /usr/sbin/munged
+  # ... wait for slurmctld ...
+  exec /usr/sbin/slurmd -Z -Dvvv --conf "Feature=cpu"
+'
+```
 
 ## Tear Down
 
 ```bash
-podman rm -f cpu-worker slurmctld slurmdbd mysql 2>/dev/null
-podman volume rm etc_munge etc_slurm var_log_slurm slurm_jobdir 2>/dev/null
-podman network rm slurm-network 2>/dev/null
+sudo podman rm -f cpu-worker slurmctld slurmdbd mysql 2>/dev/null
+sudo podman volume rm etc_munge etc_slurm var_log_slurm slurm_jobdir 2>/dev/null
+sudo podman network rm slurm-network 2>/dev/null
 ```

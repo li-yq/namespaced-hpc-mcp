@@ -65,14 +65,35 @@ def run_doctor() -> None:
     if not subuid_ok:
         all_ok = False
 
-    # 5. Check Slurm binaries
+    # 5. Check configured bind paths exist
+    try:
+        cfg = load_config()
+        bind_paths = cfg.namespace_defaults.bind_ro
+        all_bind_ok = True
+        for p in bind_paths:
+            exists = Path(p).exists()
+            if not exists:
+                all_bind_ok = False
+            _check(f"  bind path '{p}' exists", exists)
+        if not all_bind_ok:
+            all_ok = False
+
+        instances_dir = cfg.resolve_instances_dir()
+        dir_ok = instances_dir.exists() or instances_dir.parent.exists()
+        _check(f"instances dir '{instances_dir}' accessible", dir_ok)
+        if not dir_ok:
+            all_ok = False
+    except Exception:
+        pass
+
+    # 6. Check Slurm binaries
     for bin_name in ["sbatch", "squeue", "sacct", "scancel"]:
         found = shutil.which(bin_name) is not None
         _check(f"{bin_name} found", found)
         if not found:
             all_ok = False
 
-    # 6. Check /tmp is writable
+    # 7. Check /tmp is writable
     tmp_ok = os.access("/tmp", os.W_OK)
     _check("/tmp writable", tmp_ok)
     if not tmp_ok:

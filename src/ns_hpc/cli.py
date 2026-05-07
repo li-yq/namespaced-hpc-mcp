@@ -89,21 +89,67 @@ def exec(
         print(f"Error: instance '{instance_id}' not found.", file=sys.stderr)
         raise typer.Exit(code=1)
 
+    task_id = inst.gen_task_id()
+    stdout_path, stderr_path = inst.audit_start(task_id, " ".join(command))
+
     result = run_in_sandbox(
         command=command,
         workspace_host_path=str(inst.workspace_dir),
         config=cfg,
     )
 
+    inst.audit_finish(task_id, result.exit_code)
+
+    # Write output to separate files for non-interactive access
+    stdout_path.write_text(result.stdout or "")
+    stderr_path.write_text(result.stderr or "")
+
     if result.stdout:
         sys.stdout.write(result.stdout)
     if result.stderr:
         sys.stderr.write(result.stderr)
 
-    inst.write_audit(" ".join(command), {
-        "exit_code": result.exit_code,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-    })
-
     raise typer.Exit(code=result.exit_code)
+
+
+@instance_app.command()
+def destroy(
+    instance_id: str = typer.Argument(help="Instance ID"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
+):
+    """Remove an instance and its workspace."""
+    cfg = load_config()
+    inst = Instance.load(instance_id, cfg)
+
+    if inst is None:
+        print(f"Error: instance '{instance_id}' not found.", file=sys.stderr)
+        raise typer.Exit(code=1)
+
+    if not force:
+        confirm = input(f"Destroy instance '{instance_id}' and all its data? [y/N] ")
+        if confirm.lower() not in ("y", "yes"):
+            print("Aborted.")
+            return
+
+    Instance.destroy(instance_id, cfg)
+    print(f"Destroyed instance '{instance_id}'.")
+
+
+@instance_app.command()
+def enter(
+    instance_id: str = typer.Argument(help="Instance ID"),
+):
+    """Start an interactive bash shell inside a sandbox instance."""
+    cfg = load_config()
+    inst = Instance.load(instance_id, cfg)
+
+    if inst is None:
+        print(f"Error: instance '{instance_id}' not found.", file=sys.stderr)
+        raise typer.Exit(code=1)
+
+    argv = build_bwrap_args(
+        command=["/bin/bash", "-i"],
+        workspace_host_path=str(inst.workspace_dir),
+        config=cfg,
+    )
+    os.execvp("bwrap", argv)

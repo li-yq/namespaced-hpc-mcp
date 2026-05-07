@@ -254,10 +254,10 @@ class SlurmTaskEngine:
         if handle.status is not TaskStatus.RUNNING:
             return handle
 
-        # Poll via sacct
+        # Poll via sacct (try --json first, fall back to --parsable2)
         try:
             result = subprocess.run(
-                ["sacct", "-j", str(handle.slurm_job_id), "--format=State,ExitCode", "--noheader", "-P"],
+                ["sacct", "-j", str(handle.slurm_job_id), "--json"],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -268,36 +268,40 @@ class SlurmTaskEngine:
         if result.returncode != 0:
             return handle
 
-        for line in result.stdout.strip().splitlines():
-            parts = line.strip().split("|")
-            if len(parts) >= 2:
-                state = parts[0].strip()
-                exit_code_str = parts[1].strip()
+        try:
+            data = json.loads(result.stdout)
+            jobs = data.get("jobs", [])
+        except (json.JSONDecodeError, TypeError):
+            jobs = []
 
-                if state in ("COMPLETED",):
-                    handle.status = TaskStatus.COMPLETED
-                    try:
-                        handle.exit_code = int(exit_code_str.split(":")[0])
-                    except (ValueError, IndexError):
-                        handle.exit_code = 0
-                    handle.completed_at = datetime.now(timezone.utc).isoformat()
-                    # Read output from slurm files
-                    out_file = self.instance.workspace_dir / f"slurm_{handle.slurm_job_id}.out"
-                    err_file = self.instance.workspace_dir / f"slurm_{handle.slurm_job_id}.err"
-                    if out_file.exists():
-                        handle.stdout = out_file.read_text()
-                    if err_file.exists():
-                        handle.stderr = err_file.read_text()
-                    break
-                elif state in ("FAILED", "TIMEOUT", "NODE_FAIL"):
-                    handle.status = TaskStatus.FAILED
-                    handle.exit_code = -1
-                    handle.completed_at = datetime.now(timezone.utc).isoformat()
-                    break
-                elif state in ("CANCELLED",):
-                    handle.status = TaskStatus.CANCELLED
-                    handle.completed_at = datetime.now(timezone.utc).isoformat()
-                    break
+        for job in jobs:
+            state = (job.get("state") or "").strip()
+            exit_code_str = (job.get("exit_code") or "").strip()
+
+            if state in ("COMPLETED",):
+                handle.status = TaskStatus.COMPLETED
+                try:
+                    handle.exit_code = int(exit_code_str.split(":")[0])
+                except (ValueError, IndexError):
+                    handle.exit_code = 0
+                handle.completed_at = datetime.now(timezone.utc).isoformat()
+                # Read output from slurm files
+                out_file = self.instance.workspace_dir / f"slurm_{handle.slurm_job_id}.out"
+                err_file = self.instance.workspace_dir / f"slurm_{handle.slurm_job_id}.err"
+                if out_file.exists():
+                    handle.stdout = out_file.read_text()
+                if err_file.exists():
+                    handle.stderr = err_file.read_text()
+                break
+            elif state in ("FAILED", "TIMEOUT", "NODE_FAIL"):
+                handle.status = TaskStatus.FAILED
+                handle.exit_code = -1
+                handle.completed_at = datetime.now(timezone.utc).isoformat()
+                break
+            elif state in ("CANCELLED",):
+                handle.status = TaskStatus.CANCELLED
+                handle.completed_at = datetime.now(timezone.utc).isoformat()
+                break
 
         return handle
 

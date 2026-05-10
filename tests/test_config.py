@@ -17,6 +17,12 @@ def test_default_config():
     assert cfg.proxied_mcps == {}
     assert cfg.resource_defaults.context_dirs == ["config/context"]
     assert cfg.resource_defaults.resource_patterns == ["*.md"]
+    assert cfg.slurm.partition == "debug"
+    assert cfg.slurm.default_cpus == 1
+    assert cfg.slurm.default_memory_gb == 4
+    assert cfg.slurm.default_timeout == 3600
+    assert cfg.resource_limits.local_timeout == 300
+    assert cfg.resource_limits.slurm_timeout == 86400
 
 
 def test_config_from_toml():
@@ -35,6 +41,15 @@ env = {TOKEN = "sekret"}
 [resource_defaults]
 context_dirs = ["docs"]
 resource_patterns = ["*.rst", "*.txt"]
+
+[slurm]
+partition = "gpu"
+default_cpus = 2
+default_memory_gb = 8
+
+[resource_limits]
+local_timeout = 600
+slurm_timeout = 43200
 """
     with tempfile.NamedTemporaryFile(mode="wb", suffix=".toml", delete=False) as f:
         f.write(toml_content.encode())
@@ -53,6 +68,11 @@ resource_patterns = ["*.rst", "*.txt"]
 
         assert cfg.resource_defaults.context_dirs == ["docs"]
         assert cfg.resource_defaults.resource_patterns == ["*.rst", "*.txt"]
+        assert cfg.slurm.partition == "gpu"
+        assert cfg.slurm.default_cpus == 2
+        assert cfg.slurm.default_memory_gb == 8
+        assert cfg.resource_limits.local_timeout == 600
+        assert cfg.resource_limits.slurm_timeout == 43200
     finally:
         os.unlink(tmp)
 

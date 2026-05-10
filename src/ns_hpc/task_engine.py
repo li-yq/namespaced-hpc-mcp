@@ -198,13 +198,18 @@ class SlurmTaskEngine:
     def submit(
         self,
         command: str,
-        timeout: int = 3600,
-        cpus: int = 1,
-        memory_gb: int = 4,
-        partition: str = "debug",
+        timeout: int | None = None,
+        cpus: int | None = None,
+        memory_gb: int | None = None,
+        partition: str | None = None,
     ) -> TaskHandle:
         if not self.available:
             raise RuntimeError("Slurm is not available on this system")
+
+        timeout = timeout or self.config.slurm.default_timeout
+        cpus = cpus or self.config.slurm.default_cpus
+        memory_gb = memory_gb or self.config.slurm.default_memory_gb
+        partition = partition or self.config.slurm.partition
 
         bwrap_args = build_bwrap_args(
             command=["/bin/sh", "-c", command],

@@ -30,6 +30,7 @@ class JobStatus(str, Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     TIMEOUT = "timeout"
+    UNKNOWN = "unknown"
 
 
 @dataclass

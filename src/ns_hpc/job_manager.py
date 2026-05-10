@@ -1,18 +1,18 @@
-"""Job manager — async job lifecycle with on-disk output.
+"""Job manager — async job lifecycle with on-disk persistence.
 
 Every job writes stdout/stderr directly to disk files via shell redirect.
-No pipes, no in-memory buffering. The job manager tracks PIDs, checks
-status via polling, and reads tail lines from the output files on demand.
+Job state is persisted to a JSON file so it survives process restarts.
 """
 from __future__ import annotations
 
+import json
 import os
-import shutil
-import signal
+import shlex
 import subprocess
+import sys
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -20,7 +20,6 @@ from typing import Optional
 
 from ns_hpc.config import Config
 from ns_hpc.instance import Instance
-from ns_hpc.namespace import build_bwrap_args
 
 
 class JobStatus(str, Enum):
@@ -96,23 +95,49 @@ def _tail_file(path: Path, n: int = 50) -> str:
 class JobManager:
     """Manages async jobs for an instance.
 
-    Each job runs inside a bwrap sandbox.  stdout/stderr are redirected
-    directly to disk files via shell redirect — no Python-side pipes.
+    Each job runs inside a bwrap sandbox (via ``ns-hpc bwrap`` CLI).
+    stdout/stderr are redirected directly to disk files via shell redirect.
+    Job state is persisted to a JSON file for survival across restarts.
     """
 
     def __init__(self, instance: Instance, config: Config):
         self.instance = instance
         self.config = config
-        self._jobs: dict[str, dict] = {}  # job_id -> {handle, proc, ...}
+        # In-memory subprocess handles for local (running) jobs
+        self._procs: dict[str, subprocess.Popen] = {}
+        # Disk-persisted job metadata
+        self._jobs_path = instance.workspace_dir / ".ns_hpc_jobs.json"
+        self._jobs = self._load_jobs()
+
+    # ── Persistence ──────────────────────────────────────────────────────
+
+    def _load_jobs(self) -> dict[str, dict]:
+        """Load job metadata from disk. Returns {} on any error."""
+        try:
+            if self._jobs_path.exists():
+                return json.loads(self._jobs_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+        return {}
+
+    def _save_jobs(self) -> None:
+        """Atomically write job metadata to disk."""
+        self._jobs_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._jobs_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._jobs, indent=2))
+        os.replace(tmp, self._jobs_path)
+
+    # ── Job ID & output dir ──────────────────────────────────────────────
 
     def _next_job_id(self) -> str:
         return uuid.uuid4().hex[:12]
 
     def _ensure_output_dir(self) -> Path:
-        """Create output dir inside workspace so it's accessible from sandbox."""
         p = self.instance.workspace_dir / ".ns_hpc_output"
         p.mkdir(parents=True, exist_ok=True)
         return p
+
+    # ── Submit ───────────────────────────────────────────────────────────
 
     def submit(
         self,
@@ -124,8 +149,9 @@ class JobManager:
     ) -> JobResult:
         """Submit a job and wait up to ``timeout`` seconds.
 
-        The command runs inside a bwrap sandbox.  stdout/stderr are written
-        directly to ``{output_dir}/{job_id}.{out,err}`` via shell redirect.
+        The command runs inside a bwrap sandbox (via ``ns-hpc bwrap`` CLI).
+        stdout/stderr are written directly to ``{output_dir}/{job_id}.{out,err}``
+        via shell redirect.
 
         Always waits the full ``timeout`` (or until the job finishes).
         Returns tail lines of whatever output was produced.
@@ -162,32 +188,39 @@ class JobManager:
         timeout: float,
         tail: int,
     ) -> JobResult:
-        argv = build_bwrap_args(
-            command=["/bin/sh", "-c", wrapped_command],
-            workspace_host_path=str(self.instance.workspace_dir),
-            config=self.config,
-        )
+        cli_args = [
+            sys.executable, "-m", "ns_hpc", "bwrap", "--",
+            "/bin/sh", "-c", raw_command,
+        ]
+
+        # Create output files upfront so they exist even if command is still running
+        stdout_path.touch()
+        stderr_path.touch()
 
         proc = subprocess.Popen(
-            argv,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            cli_args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
 
-        # Track the job
+        # Persist job metadata
         started_at = time.monotonic()
         self._jobs[job_id] = {
-            "proc": proc,
             "command": raw_command,
             "mode": "local",
-            "stdout_path": stdout_path,
-            "stderr_path": stderr_path,
+            "status": "running",
+            "pid": proc.pid,
+            "slurm_job_id": None,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+        self._procs[job_id] = proc
+        self._save_jobs()
 
         # Wait up to timeout
         try:
-            proc.communicate(timeout=timeout)
+            stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             elapsed = time.monotonic() - started_at
             return JobResult(
@@ -199,6 +232,10 @@ class JobManager:
                 stderr_path=str(stderr_path),
                 duration=elapsed,
             )
+
+        # Write captured output to files
+        stdout_path.write_text(stdout_bytes.decode(errors="replace") if stdout_bytes else "")
+        stderr_path.write_text(stderr_bytes.decode(errors="replace") if stderr_bytes else "")
 
         # Process finished
         elapsed = time.monotonic() - started_at
@@ -213,10 +250,11 @@ class JobManager:
         tail: int,
         elapsed: float,
     ) -> JobResult:
-        if job_id in self._jobs:
-            del self._jobs[job_id]
         exit_code = proc.returncode
         status = JobStatus.COMPLETED if exit_code == 0 else JobStatus.FAILED
+        self._procs.pop(job_id, None)
+        self._jobs.pop(job_id, None)
+        self._save_jobs()
         return JobResult(
             job_id=job_id,
             status=status,
@@ -238,17 +276,11 @@ class JobManager:
         timeout: float,
         tail: int,
     ) -> JobResult:
-        import shlex
-
-        bwrap_args = build_bwrap_args(
-            command=["/bin/sh", "-c", wrapped_command],
-            workspace_host_path=str(self.instance.workspace_dir),
-            config=self.config,
+        partition = self.config.slurm.partition
+        bwrap_cmd = (
+            f"{sys.executable} -m ns_hpc bwrap -- "
+            f"/bin/sh -c {shlex.quote(wrapped_command)}"
         )
-        bwrap_cmd = " ".join(shlex.quote(a) for a in bwrap_args)
-
-        # Find a valid partition
-        partition = self._detect_partition()
 
         script = f"""#!/bin/bash
 #SBATCH --job-name=ns-hpc-{job_id[:8]}
@@ -273,21 +305,23 @@ class JobManager:
 
         started_at = time.monotonic()
         self._jobs[job_id] = {
-            "slurm_job_id": slurm_job_id,
             "command": raw_command,
             "mode": "slurm",
-            "stdout_path": stdout_path,
-            "stderr_path": stderr_path,
+            "status": "running",
+            "pid": None,
+            "slurm_job_id": slurm_job_id,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+        self._save_jobs()
 
-        # Slurm may not schedule immediately; wait up to timeout
+        # Slurm may not schedule immediately; brief initial wait
         elapsed = time.monotonic() - started_at
         remaining = timeout - elapsed
         if remaining > 0:
-            time.sleep(min(remaining, 5))  # brief initial wait
+            time.sleep(min(remaining, 5))
 
-        # Return running — Slurm jobs are inherently async
         return JobResult(
             job_id=job_id,
             status=JobStatus.RUNNING,
@@ -296,24 +330,7 @@ class JobManager:
             duration=time.monotonic() - started_at,
         )
 
-    def _detect_partition(self) -> str:
-        """Find a usable Slurm partition."""
-        try:
-            r = subprocess.run(
-                ["sinfo", "--noheader", "-o", "%P"],
-                capture_output=True, text=True, timeout=15,
-            )
-            if r.returncode == 0:
-                partitions = [
-                    p.strip().rstrip("*")
-                    for p in r.stdout.strip().splitlines()
-                    if p.strip()
-                ]
-                if partitions:
-                    return partitions[0]
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-        return "debug"
+    # ── Poll ─────────────────────────────────────────────────────────────
 
     def poll(
         self,
@@ -342,11 +359,24 @@ class JobManager:
         timeout: float,
         tail: int,
     ) -> JobResult:
-        proc: subprocess.Popen = entry["proc"]
-        stdout_path: Path = entry["stdout_path"]
-        stderr_path: Path = entry["stderr_path"]
+        proc = self._procs.get(job_id)
+        stdout_path: Path = Path(entry["stdout_path"])
+        stderr_path: Path = Path(entry["stderr_path"])
 
         started_at = time.monotonic()
+
+        if proc is None:
+            # Process handle gone but entry still exists — stale/finished
+            status = JobStatus(entry.get("status", "unknown"))
+            return JobResult(
+                job_id=job_id,
+                status=status,
+                exit_code=entry.get("exit_code"),
+                stdout_tail=_tail_file(stdout_path, tail),
+                stderr_tail=_tail_file(stderr_path, tail),
+                stdout_path=str(stdout_path),
+                stderr_path=str(stderr_path),
+            )
 
         if timeout > 0 and proc.poll() is None:
             try:
@@ -387,9 +417,15 @@ class JobManager:
         timeout: float,
         tail: int,
     ) -> JobResult:
-        slurm_job_id = entry["slurm_job_id"]
-        stdout_path: Path = entry["stdout_path"]
-        stderr_path: Path = entry["stderr_path"]
+        slurm_job_id = entry.get("slurm_job_id")
+        stdout_path: Path = Path(entry["stdout_path"])
+        stderr_path: Path = Path(entry["stderr_path"])
+
+        if slurm_job_id is None:
+            return JobResult(
+                job_id=job_id, status=JobStatus.UNKNOWN,
+                stdout_path=str(stdout_path), stderr_path=str(stderr_path),
+            )
 
         try:
             result = subprocess.run(
@@ -397,16 +433,18 @@ class JobManager:
                 capture_output=True, text=True, timeout=30,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
+            entry["status"] = "unknown"
+            self._save_jobs()
             return JobResult(
-                job_id=job_id,
-                status=JobStatus.RUNNING,
-                stdout_path=str(stdout_path),
-                stderr_path=str(stderr_path),
+                job_id=job_id, status=JobStatus.UNKNOWN,
+                stdout_path=str(stdout_path), stderr_path=str(stderr_path),
             )
 
         if result.returncode != 0:
+            entry["status"] = "unknown"
+            self._save_jobs()
             return JobResult(
-                job_id=job_id, status=JobStatus.RUNNING,
+                job_id=job_id, status=JobStatus.UNKNOWN,
                 stdout_path=str(stdout_path), stderr_path=str(stderr_path),
             )
 
@@ -416,18 +454,22 @@ class JobManager:
         except (json.JSONDecodeError, TypeError):
             jobs = []
 
+        matched = 0
+        final_result: Optional[JobResult] = None
+
         for job in jobs:
             state = (job.get("state") or "").strip()
             exit_code_str = (job.get("exit_code") or "").strip()
 
             if state in ("COMPLETED",):
-                self._jobs.pop(job_id, None)
                 ec = 0
                 try:
                     ec = int(exit_code_str.split(":")[0])
                 except (ValueError, IndexError):
                     pass
-                return JobResult(
+                self._jobs.pop(job_id, None)
+                self._save_jobs()
+                final_result = JobResult(
                     job_id=job_id, status=JobStatus.COMPLETED,
                     exit_code=ec,
                     stdout_tail=_tail_file(stdout_path, tail),
@@ -435,15 +477,33 @@ class JobManager:
                     stdout_path=str(stdout_path),
                     stderr_path=str(stderr_path),
                 )
+                matched += 1
             elif state in ("FAILED", "TIMEOUT", "NODE_FAIL", "CANCELLED"):
                 self._jobs.pop(job_id, None)
-                return JobResult(
+                self._save_jobs()
+                final_result = JobResult(
                     job_id=job_id, status=JobStatus.FAILED, exit_code=-1,
                     stdout_path=str(stdout_path), stderr_path=str(stderr_path),
                 )
+                matched += 1
 
+        if matched > 1:
+            print(f"Warning: sacct returned {matched} results for job {slurm_job_id}", file=sys.stderr)
+
+        if matched == 0:
+            entry["status"] = "unknown"
+            self._save_jobs()
+            return JobResult(
+                job_id=job_id, status=JobStatus.UNKNOWN,
+                stdout_path=str(stdout_path), stderr_path=str(stderr_path),
+            )
+
+        if final_result is not None:
+            return final_result
+
+        # Should not reach here
         return JobResult(
-            job_id=job_id, status=JobStatus.RUNNING,
+            job_id=job_id, status=JobStatus.UNKNOWN,
             stdout_path=str(stdout_path), stderr_path=str(stderr_path),
         )
 
@@ -454,35 +514,44 @@ class JobManager:
             return False
 
         if entry["mode"] == "local":
-            proc: subprocess.Popen = entry["proc"]
-            if proc.poll() is None:
-                proc.terminate()
+            proc = self._procs.get(job_id)
+            if proc and proc.poll() is None:
+                # bwrap runs as PID 1 and ignores SIGTERM; SIGKILL is required.
+                # Child processes inherit pipe fds, so communicate() after kill
+                # can hang. Use a short timeout, then fall back to wait().
+                proc.kill()
                 try:
-                    proc.communicate(timeout=5)
+                    proc.communicate(timeout=3)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.communicate()
+                    proc.wait()
+            self._procs.pop(job_id, None)
             self._jobs.pop(job_id, None)
+            self._save_jobs()
             return True
         else:
             slurm_job_id = entry.get("slurm_job_id")
             if slurm_job_id:
                 subprocess.run(["scancel", str(slurm_job_id)], timeout=15)
             self._jobs.pop(job_id, None)
+            self._save_jobs()
             return True
 
     def list_jobs(self) -> list[dict]:
-        """List all tracked jobs."""
+        """List all tracked jobs from disk-persisted state."""
         result = []
         for job_id, entry in self._jobs.items():
-            proc = entry.get("proc")
-            status = JobStatus.RUNNING
+            status = entry.get("status", "unknown")
+            # For local jobs, check if process is still alive
+            proc = self._procs.get(job_id)
             if proc and proc.poll() is not None:
-                status = JobStatus.COMPLETED if proc.returncode == 0 else JobStatus.FAILED
+                ec = proc.returncode
+                status = "completed" if ec == 0 else "failed"
+                self._jobs[job_id]["status"] = status
+                self._save_jobs()
 
             result.append({
                 "job_id": job_id,
-                "status": status.value,
+                "status": status,
                 "command": entry.get("command", ""),
                 "mode": entry.get("mode", "local"),
                 "created_at": entry.get("created_at", ""),

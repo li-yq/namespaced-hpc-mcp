@@ -8,3 +8,13 @@ flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--
 [resource_defaults]
 context_dirs = ["context"]
 resource_patterns = ["*.md"]
+
+[slurm]
+partition = "debug"
+default_cpus = 1
+default_memory_gb = 4
+default_timeout = 3600
+
+[resource_limits]
+local_timeout = 300
+slurm_timeout = 86400

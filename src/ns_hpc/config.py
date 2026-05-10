@@ -22,10 +22,24 @@ class ResourceDefaults(BaseModel):
     resource_patterns: list[str] = ["*.md"]
 
 
+class SlurmConfig(BaseModel):
+    partition: str = "debug"
+    default_cpus: int = 1
+    default_memory_gb: int = 4
+    default_timeout: int = 3600
+
+
+class ResourceLimits(BaseModel):
+    local_timeout: int = 300
+    slurm_timeout: int = 86400
+
+
 class Config(BaseModel):
     namespace_defaults: NamespaceDefaults
     proxied_mcps: dict[str, ProxiedMCP]
     resource_defaults: ResourceDefaults
+    slurm: SlurmConfig = SlurmConfig()
+    resource_limits: ResourceLimits = ResourceLimits()
     instances_dir: str = "${HOME}/mcp_instances"
 
     def resolve_instances_dir(self) -> Path:
@@ -44,6 +58,8 @@ def _default_config() -> Config:
             context_dirs=["config/context"],
             resource_patterns=["*.md"],
         ),
+        slurm=SlurmConfig(),
+        resource_limits=ResourceLimits(),
     )
 
 

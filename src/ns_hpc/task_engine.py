@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
 import shlex
 import shutil
@@ -16,6 +18,8 @@ from ns_hpc.config import Config
 from ns_hpc.instance import Instance
 from ns_hpc.namespace import build_bwrap_args
 
+logger = logging.getLogger(__name__)
+
 
 class TaskStatus(str, Enum):
     PENDING = "pending"
@@ -23,6 +27,7 @@ class TaskStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    UNKNOWN = "unknown"
 
 
 @dataclass
@@ -263,9 +268,11 @@ class SlurmTaskEngine:
                 timeout=30,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
+            handle.status = TaskStatus.UNKNOWN
             return handle
 
         if result.returncode != 0:
+            handle.status = TaskStatus.UNKNOWN
             return handle
 
         try:
@@ -274,6 +281,7 @@ class SlurmTaskEngine:
         except (json.JSONDecodeError, TypeError):
             jobs = []
 
+        matched = 0
         for job in jobs:
             state = (job.get("state") or "").strip()
             exit_code_str = (job.get("exit_code") or "").strip()
@@ -292,16 +300,25 @@ class SlurmTaskEngine:
                     handle.stdout = out_file.read_text()
                 if err_file.exists():
                     handle.stderr = err_file.read_text()
-                break
+                matched += 1
             elif state in ("FAILED", "TIMEOUT", "NODE_FAIL"):
                 handle.status = TaskStatus.FAILED
                 handle.exit_code = -1
                 handle.completed_at = datetime.now(timezone.utc).isoformat()
-                break
+                matched += 1
             elif state in ("CANCELLED",):
                 handle.status = TaskStatus.CANCELLED
                 handle.completed_at = datetime.now(timezone.utc).isoformat()
-                break
+                matched += 1
+
+        if matched > 1:
+            logger.warning(
+                "sacct returned %d entries for slurm job %s; expected exactly 1",
+                matched, handle.slurm_job_id,
+            )
+
+        if matched == 0:
+            handle.status = TaskStatus.UNKNOWN
 
         return handle
 

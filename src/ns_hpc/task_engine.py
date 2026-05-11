@@ -18,6 +18,36 @@ from ns_hpc.namespace import build_bwrap_args
 logger = logging.getLogger(__name__)
 
 
+# Slurm 25.11+ changed sacct --json state/exit_code from flat strings to nested
+# dicts.  These helpers normalise both formats.
+
+
+def _parse_slurm_state(job: dict) -> str:
+    """Extract the current Slurm job state string from sacct --json output."""
+    raw = job.get("state", "")
+    if isinstance(raw, dict):
+        # Format: {"current": ["COMPLETED"], ...}
+        current = raw.get("current", [])
+        return current[0] if current else ""
+    return str(raw).strip()
+
+
+def _parse_slurm_exit_code(job: dict) -> int | None:
+    """Extract the numeric exit code from sacct --json output."""
+    raw = job.get("exit_code", "")
+    if isinstance(raw, dict):
+        # Format: {"return_code": {"set": true, "number": 0}, ...}
+        rc = raw.get("return_code", {})
+        if rc.get("set"):
+            return int(rc["number"])
+        return None
+    # Old format: "0:0"
+    try:
+        return int(str(raw).split(":")[0])
+    except (ValueError, IndexError):
+        return None
+
+
 class TaskStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -209,10 +239,12 @@ class SlurmTaskEngine:
             return None
 
         handle = entry["handle"]
-        if handle.status is not TaskStatus.RUNNING:
+        # UNKNOWN is transient (sacct may not have recorded the job yet);
+        # always re-poll so it can resolve to a terminal state.
+        if handle.status not in (TaskStatus.RUNNING, TaskStatus.UNKNOWN):
             return handle
 
-        # Poll via sacct (try --json first, fall back to --parsable2)
+        # Poll via sacct
         try:
             result = subprocess.run(
                 ["sacct", "-j", str(handle.slurm_job_id), "--json"],
@@ -236,15 +268,12 @@ class SlurmTaskEngine:
 
         matched = 0
         for job in jobs:
-            state = (job.get("state") or "").strip()
-            exit_code_str = (job.get("exit_code") or "").strip()
+            state = _parse_slurm_state(job)
+            ec = _parse_slurm_exit_code(job)
 
             if state in ("COMPLETED",):
                 handle.status = TaskStatus.COMPLETED
-                try:
-                    handle.exit_code = int(exit_code_str.split(":")[0])
-                except (ValueError, IndexError):
-                    handle.exit_code = 0
+                handle.exit_code = ec if ec is not None else 0
                 handle.completed_at = datetime.now(timezone.utc).isoformat()
                 # Read output from slurm files
                 out_file = self.instance.workspace_dir / f"slurm_{handle.slurm_job_id}.out"
@@ -256,7 +285,7 @@ class SlurmTaskEngine:
                 matched += 1
             elif state in ("FAILED", "TIMEOUT", "NODE_FAIL"):
                 handle.status = TaskStatus.FAILED
-                handle.exit_code = -1
+                handle.exit_code = ec if ec is not None else -1
                 handle.completed_at = datetime.now(timezone.utc).isoformat()
                 matched += 1
             elif state in ("CANCELLED",):

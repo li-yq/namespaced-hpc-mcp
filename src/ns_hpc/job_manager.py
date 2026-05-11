@@ -22,6 +22,29 @@ from ns_hpc.config import Config
 from ns_hpc.instance import Instance
 
 
+# Slurm 25.11+ changed sacct --json state/exit_code from flat strings to nested
+# dicts.  These helpers normalise both formats.
+def _parse_slurm_state(job: dict) -> str:
+    raw = job.get("state", "")
+    if isinstance(raw, dict):
+        current = raw.get("current", [])
+        return current[0] if current else ""
+    return str(raw).strip()
+
+
+def _parse_slurm_exit_code(job: dict) -> int | None:
+    raw = job.get("exit_code", "")
+    if isinstance(raw, dict):
+        rc = raw.get("return_code", {})
+        if rc.get("set"):
+            return int(rc["number"])
+        return None
+    try:
+        return int(str(raw).split(":")[0])
+    except (ValueError, IndexError):
+        return None
+
+
 class JobStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -458,15 +481,11 @@ class JobManager:
         final_result: Optional[JobResult] = None
 
         for job in jobs:
-            state = (job.get("state") or "").strip()
-            exit_code_str = (job.get("exit_code") or "").strip()
+            state = _parse_slurm_state(job)
+            ec = _parse_slurm_exit_code(job)
 
             if state in ("COMPLETED",):
-                ec = 0
-                try:
-                    ec = int(exit_code_str.split(":")[0])
-                except (ValueError, IndexError):
-                    pass
+                ec = ec if ec is not None else 0
                 self._jobs.pop(job_id, None)
                 self._save_jobs()
                 final_result = JobResult(
@@ -482,7 +501,8 @@ class JobManager:
                 self._jobs.pop(job_id, None)
                 self._save_jobs()
                 final_result = JobResult(
-                    job_id=job_id, status=JobStatus.FAILED, exit_code=-1,
+                    job_id=job_id, status=JobStatus.FAILED,
+                    exit_code=ec if ec is not None else -1,
                     stdout_path=str(stdout_path), stderr_path=str(stderr_path),
                 )
                 matched += 1

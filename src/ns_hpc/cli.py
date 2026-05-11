@@ -7,7 +7,7 @@ import typer
 from ns_hpc.cli_impl import clean_instances, run_doctor
 from ns_hpc.config import load_config
 from ns_hpc.instance import Instance
-from ns_hpc.job_manager import JobManager
+from ns_hpc.job_manager import JobManager, JobStatus
 from ns_hpc.namespace import build_bwrap_args
 
 app = typer.Typer()
@@ -150,7 +150,7 @@ def run(
         from pathlib import Path
         result.stdout_tail = _tail_file(Path(result.stdout_path), tail)
         result.stderr_tail = _tail_file(Path(result.stderr_path), tail)
-        result.status = "timeout"
+        result.status = JobStatus.TIMEOUT
 
     print(f"Job {result.job_id}: {result.status.value}")
     if result.exit_code is not None:
@@ -195,7 +195,7 @@ def status(
         from pathlib import Path
         result.stdout_tail = _tail_file(Path(result.stdout_path), tail)
         result.stderr_tail = _tail_file(Path(result.stderr_path), tail)
-        result.status = "timeout"
+        result.status = JobStatus.TIMEOUT
 
     print(f"Job {result.job_id}: {result.status.value}")
     if result.exit_code is not None:

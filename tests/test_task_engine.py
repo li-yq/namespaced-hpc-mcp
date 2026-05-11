@@ -2,7 +2,7 @@ import shutil
 import tempfile
 import time
 
-from ns_hpc.config import Config, NamespaceDefaults, ResourceDefaults
+from ns_hpc.config import Config, NamespaceDefaults, ResourceDefaults, SlurmConfig
 from ns_hpc.instance import Instance
 from ns_hpc.task_engine import (
     LocalTaskEngine,
@@ -11,7 +11,7 @@ from ns_hpc.task_engine import (
 )
 
 
-def _config(tmp_dir: str) -> Config:
+def _config(tmp_dir: str, partition: str | None = None) -> Config:
     return Config(
         namespace_defaults=NamespaceDefaults(
             bind_ro=["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"],
@@ -23,6 +23,7 @@ def _config(tmp_dir: str) -> Config:
             context_dirs=["context"],
             resource_patterns=["*.md"],
         ),
+        slurm=SlurmConfig(partition=partition) if partition else SlurmConfig(),
         instances_dir=tmp_dir,
     )
 
@@ -123,7 +124,37 @@ def test_slurm_not_available_error():
                 engine.submit("echo hello")
         else:
             # Slurm is available — just verify submit works
-            handle = engine.submit("echo hello", timeout=60)
+            # Use partition "cpu" which is common on test clusters
+            handle = engine.submit("echo hello", timeout=60, partition="cpu")
             assert handle.slurm_job_id is not None
             # Clean up
             engine.cancel(handle.id)
+
+
+def test_slurm_submit_and_poll():
+    """Submit a simple job via Slurm and poll until completion.
+
+    Stdout may be empty when the sbatch --output file lives on a
+    different container (the worker) and is invisible from the caller.
+    We verify job completion and exit code instead.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        cfg = _config(tmp_dir, partition="cpu")
+        inst = Instance.create("test-slurm-poll", cfg)
+        engine = SlurmTaskEngine(cfg, inst)
+
+        handle = engine.submit("echo hello_slurm", timeout=120, partition="cpu")
+        assert handle.slurm_job_id is not None
+        assert handle.status == TaskStatus.RUNNING
+
+        # Poll until completed (should be fast for echo).
+        # UNKNOWN is transient — sacct may not have recorded the job yet.
+        terminal = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+        for _ in range(30):
+            handle = engine.get_status(handle.id)
+            if handle.status in terminal:
+                break
+            time.sleep(1)
+
+        assert handle.status == TaskStatus.COMPLETED, f"got {handle.status}"
+        assert handle.exit_code == 0

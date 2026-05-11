@@ -3,46 +3,46 @@
 ## Overview
 
 A local Slurm cluster for testing ns-hpc's Slurm task engine, running in
-rootful podman containers.
+rootless podman containers from a docker-compose.yml in this repo.
 
 ## Quick Start
 
 ```bash
-cd /home/liyq/workspace/ns-hpc-mcp
-./scripts/slurm-cluster.sh start   # Start the cluster
-./scripts/slurm-cluster.sh stop    # Stop the cluster
-./scripts/slurm-cluster.sh status  # Check status
-```
+cd slurm
 
-## Current Status (May 7, 2026)
+# Build and start the cluster
+podman-compose up -d
 
-| Container | Status | Notes |
-|-----------|--------|-------|
-| mysql     | Up     | MariaDB 12, Slurm accounting DB |
-| slurmdbd  | Up     | Slurm Database Daemon |
-| slurmctld | Up     | Slurm Controller |
-| cpu-worker| Up     | 1 compute node (`c1`, idle) |
-
-The cluster uses rootful podman (`sudo podman`). The worker runs slurmd
-as root inside the container to bypass cgroup v2 permission issues with
-Slurm 25.11's systemd scope management.
-
-## Usage
-
-```bash
 # Check cluster status
-sudo podman exec slurmctld sinfo
-# Output: cpu* idle 1 c1
+podman exec slurm-slurmctld sinfo
+# Output: cpu* idle 1 c1, debug idle 1 c1
 
-# Submit a test job
-sudo podman exec slurmctld sbatch --wrap="echo 'Hello from ns-hpc'"
+# Run a test job
+podman exec slurm-slurmctld sbatch --wrap="echo 'Hello from ns-hpc'"
 
 # Check job status
-sudo podman exec slurmctld sacct --format=JobID,State,ExitCode,NodeList
+podman exec slurm-slurmctld sacct --format=JobID,State,ExitCode,NodeList
 
-# Clean up
-sudo podman exec slurmctld scancel -u root
+# Stop the cluster
+podman-compose down
+
+# Full cleanup (removes volumes too)
+podman-compose down && podman volume rm -f \
+  slurm_slurm_etc_munge slurm_slurm_etc_slurm \
+  slurm_slurm_var_log_slurm slurm_slurm_var_lib_mysql
 ```
+
+## Services
+
+| Container | Image | Role |
+|-----------|-------|------|
+| slurm-mysql | mariadb:12 | Accounting database |
+| slurm-slurmdbd | ns-hpc-slurm:latest | Slurm Database Daemon |
+| slurm-slurmctld | ns-hpc-slurm:latest | Slurm Controller (privileged) |
+| slurm-cpu-worker | ns-hpc-slurm:latest | Single compute node c1 (privileged) |
+
+All services use a bridge network (`slurm-network`). podman's built-in DNS
+resolves container names automatically (tested with rootless podman 5.8.1).
 
 ## Architecture
 
@@ -57,41 +57,78 @@ sudo podman exec slurmctld scancel -u root
 │                                       │           │
 │                                ┌──────▼───────┐  │
 │                                │  cpu-worker  │  │
-│                                │  slurmd -Z   │  │
-│                                │  "c1" idle   │  │
+│                                │  c1 idle     │  │
 │                                └──────────────┘  │
 └─────────────────────────────────────────────────┘
 ```
 
-## Ports
+## Image
 
-| Port | Service | Host |
-|------|---------|------|
-| 3022 | SSH     | No (SSH_ENABLE=false) |
-| 6817 | slurmctld | Container only |
-| 6818 | slurmd | Container only |
-| 6819 | slurmdbd | Container only |
+The `ns-hpc-slurm` image is built from `giovtorres/slurm-docker-cluster:latest`
+with the following additions:
 
-## Implementation Note
+- **tini** — installed via EPEL (`dnf install tini`)
+- **uv** — installed from <https://astral.sh/uv> (v0.11.13)
+- **bubblewrap** — already present in the base image
+- **testuser** — unprivileged user (uid 2000, gid 2000) for non-root testing
 
-The worker runs slurmd as root (not `gosu slurm`) because Slurm 25.11's
-cgroup/v2 plugin needs to create cgroup directories under
-`/sys/fs/cgroup/machine.slice/`, which requires root access even with
-`--cgroupns=host` and writable cgroup bind mount.
+Dockerfile: `slurm/Dockerfile`
 
-Run command used:
+To run as the test user inside a container:
+
 ```bash
---entrypoint /bin/bash -c '
-  gosu munge /usr/sbin/munged
-  # ... wait for slurmctld ...
-  exec /usr/sbin/slurmd -Z -Dvvv --conf "Feature=cpu"
-'
+podman exec --user testuser -w /data slurm-slurmctld bash
+```
+
+## Shared Filesystem
+
+Both slurmctld and cpu-worker bind-mount the project root at `/ns-hpc-mcp` (read-only) and share a writable named volume at `/data` for job output and runtime data.
+
+Slurm jobs should write output to `/data` (the writable shared volume) rather than the
+read-only project tree.
+
+## Configuration
+
+Slurm configuration (slurm.conf, slurmdbd.conf) is baked into the base image.
+Key settings:
+
+- Partition `cpu`: default, infinite time limit
+- Partition `debug`: infinite time limit, shares c1
+- Node c1: 4 CPUs, ~9 GB RAM, feature=cpu
+- Dynamic node registration via `slurmd -Z`
+
+## Verification
+
+```bash
+# Cluster status
+podman exec slurm-slurmctld sinfo
+
+# DNS resolution
+podman exec slurm-slurmctld getent hosts slurmdbd
+
+# bwrap works
+podman exec slurm-cpu-worker bwrap --ro-bind /usr /usr -- /bin/true
+
+# tini works
+podman exec slurm-slurmctld tini -- /bin/true
+
+# Project source accessible
+podman exec slurm-slurmctld ls /ns-hpc-mcp/src/ns_hpc
+```
+
+## Files
+
+```
+slurm/
+├── Dockerfile              # Image build: add tini + uv
+└── docker-compose.yml      # Service definitions
 ```
 
 ## Tear Down
 
 ```bash
-sudo podman rm -f cpu-worker slurmctld slurmdbd mysql 2>/dev/null
-sudo podman volume rm etc_munge etc_slurm var_log_slurm slurm_jobdir 2>/dev/null
-sudo podman network rm slurm-network 2>/dev/null
+cd slurm
+podman-compose down
+podman volume rm -f slurm_slurm_etc_munge slurm_slurm_etc_slurm \
+  slurm_slurm_var_log_slurm slurm_slurm_var_lib_mysql
 ```

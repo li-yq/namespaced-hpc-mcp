@@ -1,0 +1,133 @@
+services:
+  mysql:
+    image: docker.io/library/mariadb:12
+    hostname: mysql
+    container_name: slurm-mysql
+    environment:
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+      MYSQL_DATABASE: slurm_acct_db
+      MYSQL_USER: slurm
+      MYSQL_PASSWORD: password
+    volumes:
+      - slurm_var_lib_mysql:/var/lib/mysql
+    networks:
+      - slurm-network
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  slurmdbd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ns-hpc-slurm:latest
+    init: true
+    command: ["slurmdbd"]
+    container_name: slurm-slurmdbd
+    hostname: slurmdbd
+    environment:
+      MYSQL_USER: slurm
+      MYSQL_PASSWORD: password
+    volumes:
+      - slurm_etc_munge:/etc/munge
+      - slurm_etc_slurm:/etc/slurm
+      - slurm_var_log_slurm:/var/log/slurm
+    expose:
+      - "6819"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - slurm-network
+    healthcheck:
+      test: ["CMD-SHELL", "pidof slurmdbd"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  slurmctld:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ns-hpc-slurm:latest
+    init: true
+    command: ["slurmctld"]
+    container_name: slurm-slurmctld
+    hostname: slurmctld
+    privileged: true
+    working_dir: /ns-hpc-mcp
+    volumes:
+      - slurm_etc_munge:/etc/munge:z
+      - slurm_etc_slurm:/etc/slurm:z
+      - slurm_var_log_slurm:/var/log/slurm:z
+      - ..:/ns-hpc-mcp:ro,z
+      - slurm_jobdir:/data:z
+    expose:
+      - "6817"
+    depends_on:
+      slurmdbd:
+        condition: service_healthy
+    networks:
+      - slurm-network
+    healthcheck:
+      test: ["CMD-SHELL", "scontrol ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  cpu-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ns-hpc-slurm:latest
+    init: true
+    # Bypass the upstream entrypoint's replica-detection logic (relies on Docker
+    # Compose DNS conventions that podman-compose doesn't set up).  Start munged,
+    # wait for slurmctld, then register as dynamic node c1.
+    command:
+      - /bin/bash
+      - -c
+      - |
+        set -e
+        # munged is already started by the entrypoint script
+        until 2>/dev/null >/dev/tcp/slurmctld/6817; do sleep 2; done
+        exec /usr/sbin/slurmd -Z -Dvvv --conf "Feature=cpu"
+    container_name: slurm-cpu-worker
+    hostname: c1
+    privileged: true
+    working_dir: /ns-hpc-mcp
+    volumes:
+      - slurm_etc_munge:/etc/munge
+      - slurm_etc_slurm:/etc/slurm
+      - slurm_var_log_slurm:/var/log/slurm
+      - ..:/ns-hpc-mcp:ro,z
+      - slurm_jobdir:/data:z
+    expose:
+      - "6818"
+    depends_on:
+      slurmctld:
+        condition: service_healthy
+    networks:
+      - slurm-network
+    healthcheck:
+      test: ["CMD-SHELL", "pidof slurmd"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  slurm_etc_munge:
+  slurm_etc_slurm:
+  slurm_jobdir:
+  slurm_var_lib_mysql:
+  slurm_var_log_slurm:
+
+networks:
+  slurm-network:
+    driver: bridge

@@ -189,7 +189,7 @@ class JobManager:
         tail: int,
     ) -> JobResult:
         cli_args = [
-            sys.executable, "-m", "ns_hpc", "bwrap", "--",
+            sys.executable, "-m", "ns_hpc", "bwrap", self.instance.id, "--",
             "/bin/sh", "-c", raw_command,
         ]
 
@@ -278,7 +278,7 @@ class JobManager:
     ) -> JobResult:
         partition = self.config.slurm.partition
         bwrap_cmd = (
-            f"{sys.executable} -m ns_hpc bwrap -- "
+            f"{sys.executable} -m ns_hpc bwrap {self.instance.id} -- "
             f"/bin/sh -c {shlex.quote(wrapped_command)}"
         )
 

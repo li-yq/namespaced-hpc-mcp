@@ -2,12 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shlex
 import shutil
-import signal
 import subprocess
-import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -61,18 +58,11 @@ class LocalTaskEngine:
             config=self.config,
         )
 
-        # Insert json-status-fd before "--" for reliable exit code reporting
-        status_r_fd, status_w_fd = os.pipe()
-        dash_pos = bwrap_args.index("--")
-        bwrap_args[dash_pos:dash_pos] = ["--json-status-fd", str(status_w_fd)]
-
         proc = subprocess.Popen(
             bwrap_args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            pass_fds=(status_w_fd,),
         )
-        os.close(status_w_fd)  # close write end in parent
 
         task_id = str(uuid.uuid4())
         handle = TaskHandle(
@@ -84,7 +74,6 @@ class LocalTaskEngine:
         self._tasks[task_id] = {
             "handle": handle,
             "proc": proc,
-            "status_r_fd": status_r_fd,
         }
         return handle
 
@@ -103,32 +92,11 @@ class LocalTaskEngine:
         if retcode is None:
             return handle  # still running
 
-        # Process has exited — read json status fd
-        try:
-            raw_status = os.read(entry["status_r_fd"], 4096)
-        except OSError:
-            raw_status = b""
-        finally:
-            try:
-                os.close(entry["status_r_fd"])
-            except OSError:
-                pass
-            entry.pop("status_r_fd", None)
-
         # Drain stdout/stderr
         stdout_bytes, stderr_bytes = proc.communicate()
 
-        exit_code = proc.returncode
-        lines = [l for l in raw_status.splitlines() if l.strip()]
-        if lines:
-            try:
-                status = __import__("json").loads(lines[-1])
-                exit_code = status.get("exit-code", exit_code)
-            except (__import__("json").JSONDecodeError, KeyError):
-                pass
-
-        handle.status = TaskStatus.COMPLETED if exit_code == 0 else TaskStatus.FAILED
-        handle.exit_code = exit_code
+        handle.exit_code = proc.returncode
+        handle.status = TaskStatus.COMPLETED if handle.exit_code == 0 else TaskStatus.FAILED
         handle.stdout = stdout_bytes.decode() if stdout_bytes else ""
         handle.stderr = stderr_bytes.decode() if stderr_bytes else ""
         handle.completed_at = datetime.now(timezone.utc).isoformat()
@@ -144,28 +112,8 @@ class LocalTaskEngine:
             return False
 
         proc: subprocess.Popen = entry["proc"]
-
-        # bwrap ignores SIGTERM when PID 1; try SIGTERM first, then SIGKILL
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-
-        # Read json status if pipe still open
-        status_r_fd = entry.get("status_r_fd")
-        if status_r_fd is not None:
-            try:
-                os.read(status_r_fd, 4096)
-            except OSError:
-                pass
-            finally:
-                try:
-                    os.close(status_r_fd)
-                except OSError:
-                    pass
-                entry.pop("status_r_fd", None)
+        proc.kill()
+        proc.wait()
 
         # Drain remaining output
         stdout_bytes, stderr_bytes = proc.communicate()

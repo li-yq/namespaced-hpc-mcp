@@ -45,7 +45,7 @@ def test_build_bwrap_args_basic():
     assert "--chdir" in args
     assert args[args.index("--chdir") + 1] == "/workspace"
     assert "--" in args
-    assert args[args.index("--") + 1:] == ["echo", "hello"]
+    assert args[args.index("--") + 1:] == ["tini", "--", "echo", "hello"]
 
 
 def test_build_bwrap_args_extra_binds():

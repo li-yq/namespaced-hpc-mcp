@@ -1,8 +1,6 @@
-import json
 import os
 import subprocess
 from dataclasses import dataclass
-from typing import IO
 
 from ns_hpc.config import Config, load_config
 
@@ -52,6 +50,7 @@ def build_bwrap_args(
     args.extend(["--chdir", working_dir])
 
     args.append("--")
+    args.extend(["tini", "--"])
     args.extend(command)
     return args
 
@@ -82,21 +81,13 @@ def run_in_sandbox(
         config=config,
     )
 
-    r_fd, w_fd = os.pipe()
     try:
-        # Insert --json-status-fd with the write fd before "--"
-        dash_pos = args.index("--")
-        args[dash_pos:dash_pos] = ["--json-status-fd", str(w_fd)]
-
         proc = subprocess.Popen(
             args,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            pass_fds=(w_fd,),
         )
-        # Close w_fd in parent BEFORE communicate() to avoid deadlock
-        os.close(w_fd)
 
         try:
             stdout_bytes, stderr_bytes = proc.communicate(
@@ -104,53 +95,18 @@ def run_in_sandbox(
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired:
-            # bwrap runs as PID 1 in its own PID namespace and ignores
-            # SIGTERM; SIGKILL is required.  The inner command may still
-            # hold the pipe fds open, so don't wait for communicate to
-            # finish — just reap and return what we have.
             proc.kill()
             try:
                 proc.communicate(timeout=3)
             except subprocess.TimeoutExpired:
                 proc.wait()
-            try:
-                os.close(r_fd)
-            except OSError:
-                pass
             return SandboxResult(exit_code=-1, stdout="", stderr="", sandbox_ok=False)
 
-        # Read JSON status from the pipe
-        try:
-            raw_status = os.read(r_fd, 4096)
-        except OSError:
-            raw_status = b""
-        finally:
-            os.close(r_fd)
-
-        exit_code = proc.returncode
-        sandbox_ok = True
-
-        lines = [l for l in raw_status.splitlines() if l.strip()]
-        if lines:
-            try:
-                status = json.loads(lines[-1])
-                exit_code = status.get("exit-code", exit_code)
-            except (json.JSONDecodeError, KeyError):
-                sandbox_ok = False
-
         return SandboxResult(
-            exit_code=exit_code,
+            exit_code=proc.returncode,
             stdout=stdout_bytes.decode() if stdout_bytes else "",
             stderr=stderr_bytes.decode() if stderr_bytes else "",
-            sandbox_ok=sandbox_ok,
+            sandbox_ok=True,
         )
     except OSError:
-        try:
-            os.close(w_fd)
-        except OSError:
-            pass
-        try:
-            os.close(r_fd)
-        except OSError:
-            pass
         return SandboxResult(exit_code=-1, stdout="", stderr="", sandbox_ok=False)

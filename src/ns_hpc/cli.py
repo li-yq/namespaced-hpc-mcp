@@ -45,6 +45,9 @@ def clean(
 
 @app.command()
 def bwrap(
+    instance_id: str = typer.Argument(
+        help="Instance whose workspace will be mounted as the sandbox working directory.",
+    ),
     command: list[str] = typer.Argument(
         ...,
         help="Command and arguments to run inside the bwrap sandbox. Use -- to separate ns-hpc args from the command.",
@@ -53,34 +56,28 @@ def bwrap(
     """Run a command inside a bwrap sandbox with no output redirection or job tracking.
 
     This is the primitive that backs both local and Slurm job submission.
+    The command runs inside the named instance's workspace, with tini(1) as PID 1
+    so that signals are forwarded correctly.
+
     Use shell redirect for output capture:
 
-        ns-hpc bwrap -- ls -la > output.txt
+        ns-hpc bwrap my-instance -- ls -la > output.txt
 
     No --timeout, --slurm, --detach, or --tail options -
     this is a direct pass-through to bwrap.
     """
-    import subprocess
-    import tempfile
-    import shutil
-
     cfg = load_config()
-    tmpdir = tempfile.mkdtemp(prefix="ns-hpc-bwrap-")
-    try:
-        argv = build_bwrap_args(
-            command=list(command),
-            workspace_host_path=tmpdir,
-            config=cfg,
-        )
-        proc = subprocess.Popen(argv)
-        try:
-            proc.wait()
-        except KeyboardInterrupt:
-            proc.kill()
-            proc.wait()
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-    sys.exit(proc.returncode)
+    inst = Instance.load(instance_id, cfg)
+    if inst is None:
+        print(f"Error: instance '{instance_id}' not found.", file=sys.stderr)
+        raise typer.Exit(code=1)
+
+    argv = build_bwrap_args(
+        command=list(command),
+        workspace_host_path=str(inst.workspace_dir),
+        config=cfg,
+    )
+    os.execvp("bwrap", argv)
 
 
 # ── Instance subcommands ─────────────────────────────────────────────────

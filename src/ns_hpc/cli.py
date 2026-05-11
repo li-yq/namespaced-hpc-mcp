@@ -15,6 +15,19 @@ instance_app = typer.Typer()
 app.add_typer(instance_app, name="instance", help="Manage sandbox instances.")
 
 
+@app.callback()
+def main(
+    config: str | None = typer.Option(
+        None, "--config", "-c",
+        envvar="NS_HPC_CONFIG",
+        help="Path to TOML config file.  Also read from NS_HPC_CONFIG env var.",
+    ),
+) -> None:
+    """ns-hpc — HPC sandboxing via bubblewrap."""
+    if config:
+        os.environ["NS_HPC_CONFIG"] = config
+
+
 # ── Top-level commands ────────────────────────────────────────────────────
 
 

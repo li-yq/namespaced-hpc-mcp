@@ -6,22 +6,34 @@ import time
 from pathlib import Path
 
 from ns_hpc.job_manager import JobManager, JobStatus, _tail_file
-from ns_hpc.config import Config, NamespaceDefaults, ResourceDefaults
+from ns_hpc.config import Config, load_config
 from ns_hpc.instance import Instance
+
+# TOML template matching the same values that the old inline Config builder used.
+# Written to a temp file so subprocesses (ns-hpc bwrap) inherit NS_HPC_CONFIG
+# and can find test instances.
+_CONFIG_TOML = """\
+instances_dir = "{instances_dir}"
+
+[namespace_defaults]
+bind_ro = ["/usr", "/bin", "/lib", "/lib64"]
+workspace_mount = "/workspace"
+flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+
+[proxied_mcps]
+
+[resource_defaults]
+context_dirs = ["config/context"]
+resource_patterns = ["*.md"]
+"""
 
 
 def _config(tmp_dir: str | None = None) -> Config:
-    return Config(
-        namespace_defaults=NamespaceDefaults(
-            bind_ro=["/usr", "/bin", "/lib", "/lib64"],
-            workspace_mount="/workspace",
-            flags=["--unshare-all", "--share-net", "--proc", "/proc",
-                   "--dev", "/dev", "--tmpfs", "/tmp"],
-        ),
-        proxied_mcps={},
-        resource_defaults=ResourceDefaults(),
-        instances_dir=tmp_dir or tempfile.mkdtemp(),
-    )
+    tmp_dir = tmp_dir or tempfile.mkdtemp()
+    config_path = Path(tmp_dir) / "config.toml"
+    config_path.write_text(_CONFIG_TOML.format(instances_dir=tmp_dir))
+    os.environ["NS_HPC_CONFIG"] = str(config_path)
+    return load_config(str(config_path))
 
 
 def _instance(config: Config) -> Instance:

@@ -2,6 +2,8 @@ import shutil
 import tempfile
 import time
 
+import pytest
+
 from ns_hpc.config import Config, NamespaceDefaults, ResourceDefaults, SlurmConfig
 from ns_hpc.instance import Instance
 from ns_hpc.task_engine import (
@@ -138,6 +140,9 @@ def test_slurm_submit_and_poll():
     different container (the worker) and is invisible from the caller.
     We verify job completion and exit code instead.
     """
+    if not shutil.which("sbatch"):
+        pytest.skip("sbatch not found — not running on a Slurm cluster")
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         cfg = _config(tmp_dir, partition="cpu")
         inst = Instance.create("test-slurm-poll", cfg)

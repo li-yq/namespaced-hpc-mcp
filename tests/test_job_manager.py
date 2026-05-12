@@ -19,7 +19,8 @@ instances_dir = "{instances_dir}"
 [namespace_defaults]
 bind_ro = ["/usr", "/bin", "/lib", "/lib64"]
 workspace_mount = "/workspace"
-flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+         "--die-with-parent"]
 
 [proxied_mcps]
 

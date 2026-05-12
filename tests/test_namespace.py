@@ -9,7 +9,8 @@ def default_config() -> Config:
         namespace_defaults=NamespaceDefaults(
             bind_ro=["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"],
             workspace_mount="/workspace",
-            flags=["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"],
+            flags=["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+                    "--die-with-parent"],
         ),
         proxied_mcps={},
         resource_defaults=ResourceDefaults(
@@ -43,7 +44,7 @@ def test_build_bwrap_args_basic():
     assert "--chdir" in args
     assert args[args.index("--chdir") + 1] == "/workspace"
     assert "--" in args
-    assert args[args.index("--") + 1:] == ["tini", "--", "echo", "hello"]
+    assert args[args.index("--") + 1:] == ["echo", "hello"]
 
 
 def test_build_bwrap_args_extra_binds():

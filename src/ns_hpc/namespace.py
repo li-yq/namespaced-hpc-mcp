@@ -38,6 +38,5 @@ def build_bwrap_args(
     args.extend(["--chdir", working_dir])
 
     args.append("--")
-    args.extend(["tini", "--"])
     args.extend(command)
     return args

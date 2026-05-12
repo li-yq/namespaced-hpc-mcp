@@ -11,6 +11,7 @@ from typing import AsyncIterator
 
 from fastmcp import FastMCP, Context
 from fastmcp.exceptions import ToolError
+from fastmcp.resources import FileResource
 from pydantic import BaseModel, Field
 
 from ns_hpc.config import Config, load_config
@@ -22,6 +23,7 @@ from ns_hpc.job_manager import JobManager, JobStatus
 class ServerContext:
     """Lifespan context shared across MCP tools."""
     config: Config
+    config_path: str | None = None
     job_managers: dict[str, JobManager] = field(default_factory=dict)
 
 
@@ -35,14 +37,45 @@ def _get_manager(ctx: Context, instance: Instance) -> JobManager:
     return mgr
 
 
+def _register_context_resources(server: FastMCP, config: Config, config_path: str | None = None) -> None:
+    """Scan context directories and register matching files as static resources.
+
+    Relative context dirs are resolved from the config file's parent directory
+    so that the config is self-contained regardless of CWD.
+    """
+    config_dir = Path(config_path).resolve().parent if config_path else Path.cwd()
+    patterns = config.resource_defaults.resource_patterns
+    for raw_dir in config.resource_defaults.context_dirs:
+        d = Path(raw_dir).expanduser()
+        if not d.is_absolute():
+            d = config_dir / d
+        if not d.exists():
+            continue
+        for file_path in sorted(d.iterdir()):
+            if not file_path.is_file():
+                continue
+            for pat in patterns:
+                if fnmatch.fnmatch(file_path.name, pat):
+                    uri = f"resource://ns-hpc/context/{file_path.name}"
+                    resource = FileResource(
+                        uri=uri,
+                        name=file_path.name,
+                        path=file_path,
+                    )
+                    server.add_resource(resource)
+                    break
+
+
 @asynccontextmanager
 async def server_lifespan(server: FastMCP) -> AsyncIterator[ServerContext]:
-    """Initialize server context — no default instances created at startup."""
+    """Initialize server context and register context resources."""
     config_path = os.environ.get("NS_HPC_CONFIG")
     config = load_config(config_path)
 
+    _register_context_resources(server, config, config_path)
+
     try:
-        yield ServerContext(config=config)
+        yield ServerContext(config=config, config_path=config_path)
     finally:
         pass
 
@@ -53,28 +86,6 @@ mcp = FastMCP(
     instructions="HPC sandboxing via bubblewrap — manage instances and execute commands in isolated bwrap containers.",
     lifespan=server_lifespan,
 )
-
-
-# ── Context resources ─────────────────────────────────────────────────────
-
-
-@mcp.resource("resource://ns-hpc/context/{filename}")
-def get_context_resource(filename: str, ctx: Context) -> str:
-    """Serve context files (e.g. README.md, python-env.md) from the configured context directories."""
-    context: ServerContext = ctx.lifespan_context
-    patterns = context.config.resource_defaults.resource_patterns
-
-    for raw_dir in context.config.resource_defaults.context_dirs:
-        d = Path(raw_dir).expanduser()
-        if not d.is_absolute():
-            d = Path.cwd() / d
-        candidate = d / filename
-        if candidate.exists() and candidate.is_file():
-            for pat in patterns:
-                if fnmatch.fnmatch(filename, pat):
-                    return candidate.read_text()
-
-    raise ToolError(f"Context resource '{filename}' not found")
 
 
 # ── Instance management ────────────────────────────────────────────────────

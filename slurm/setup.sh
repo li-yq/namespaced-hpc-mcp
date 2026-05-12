@@ -73,7 +73,7 @@ echo "=== Creating config ==="
 podman exec --user testuser -w /home/testuser slurm-slurmctld \
     mkdir -p "$HPC_HOME" "$HPC_HOME/context"
 # Copy context markdown files into the slurm config's context directory
-for f in config/context/*.md; do
+for f in ../config/context/*.md; do
     podman cp "$f" slurm-slurmctld:"$HPC_HOME/context/"
 done
 # Write config via host temp file (avoids quoting/escaping issues)

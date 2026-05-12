@@ -183,9 +183,12 @@ class JobManager:
     ) -> JobResult:
         """Submit a job and wait up to ``timeout`` seconds.
 
-        The command runs inside a bwrap sandbox (via ``ns-hpc bwrap`` CLI).
-        stdout/stderr are written directly to ``{output_dir}/{job_id}.{out,err}``
-        via shell redirect.
+        The command runs inside a bwrap sandbox via ``ns-hpc bwrap`` CLI.
+        ``ns-hpc bwrap`` handles only the sandbox — no redirection.
+
+        The bwrap invocation is wrapped by the outer layer:
+          Local:  sh -c 'ns-hpc bwrap ... ><stdout> 2><stderr>'
+          Slurm:  sbatch --wrap='ns-hpc bwrap ...' --output=<stdout> --error=<stderr>
 
         Always waits the full ``timeout`` (or until the job finishes).
         Returns tail lines of whatever output was produced.
@@ -195,19 +198,13 @@ class JobManager:
         stdout_path = output_dir / f"{job_id}.out"
         stderr_path = output_dir / f"{job_id}.err"
 
-        # Build the wrapped command: redirect output using sandbox-visible paths
-        mount = self.config.namespace_defaults.workspace_mount
-        sandbox_stdout = f"{mount}/.ns_hpc_output/{job_id}.out"
-        sandbox_stderr = f"{mount}/.ns_hpc_output/{job_id}.err"
-        wrapped = f"({command}) >'{sandbox_stdout}' 2>'{sandbox_stderr}'"
-
         if mode == "local":
             return self._submit_local(
-                job_id, command, wrapped, stdout_path, stderr_path, timeout, tail,
+                job_id, command, stdout_path, stderr_path, timeout, tail,
             )
         elif mode == "slurm":
             return self._submit_slurm(
-                job_id, command, wrapped, stdout_path, stderr_path, timeout, tail,
+                job_id, command, stdout_path, stderr_path, timeout, tail,
             )
         else:
             raise ValueError(f"Unknown mode: {mode}")
@@ -215,32 +212,28 @@ class JobManager:
     def _submit_local(
         self,
         job_id: str,
-        raw_command: str,
-        _wrapped_command: str,
+        command: str,
         stdout_path: Path,
         stderr_path: Path,
         timeout: float,
         tail: int,
     ) -> JobResult:
-        cli_args = [
-            sys.executable, "-m", "ns_hpc", "bwrap", self.instance.id, "--",
-            "/bin/sh", "-c", raw_command,
-        ]
+        # sh -c '<python> -m ns_hpc bwrap <id> -- /bin/sh -c "<cmd>" ><out> 2><err>'
+        shell_cmd = (
+            f"{sys.executable} -m ns_hpc bwrap {self.instance.id} -- "
+            f"/bin/sh -c {shlex.quote(command)}"
+            f" >{shlex.quote(str(stdout_path))} 2>{shlex.quote(str(stderr_path))}"
+        )
 
-        # Create output files upfront so they exist even if command is still running
         stdout_path.touch()
         stderr_path.touch()
 
-        proc = subprocess.Popen(
-            cli_args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        proc = subprocess.Popen(["sh", "-c", shell_cmd])
 
         # Persist job metadata
         started_at = time.monotonic()
         self._jobs[job_id] = {
-            "command": raw_command,
+            "command": command,
             "mode": "local",
             "status": "running",
             "pid": proc.pid,
@@ -252,9 +245,9 @@ class JobManager:
         self._procs[job_id] = proc
         self._save_jobs()
 
-        # Wait up to timeout
+        # Wait up to timeout — output is written to files by shell redirect
         try:
-            stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout)
+            proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             elapsed = time.monotonic() - started_at
             return JobResult(
@@ -266,10 +259,6 @@ class JobManager:
                 stderr_path=str(stderr_path),
                 duration=elapsed,
             )
-
-        # Write captured output to files
-        stdout_path.write_text(stdout_bytes.decode(errors="replace") if stdout_bytes else "")
-        stderr_path.write_text(stderr_bytes.decode(errors="replace") if stderr_bytes else "")
 
         # Process finished
         elapsed = time.monotonic() - started_at
@@ -303,33 +292,27 @@ class JobManager:
     def _submit_slurm(
         self,
         job_id: str,
-        raw_command: str,
-        wrapped_command: str,
+        command: str,
         stdout_path: Path,
         stderr_path: Path,
         timeout: float,
         tail: int,
     ) -> JobResult:
-        partition = self.config.slurm.partition
         bwrap_cmd = (
             f"{sys.executable} -m ns_hpc bwrap {self.instance.id} -- "
-            f"/bin/sh -c {shlex.quote(wrapped_command)}"
+            f"/bin/sh -c {shlex.quote(command)}"
         )
 
-        script = f"""#!/bin/bash
-#SBATCH --job-name=ns-hpc-{job_id[:8]}
-#SBATCH --output={stdout_path}
-#SBATCH --error={stderr_path}
-#SBATCH --time={max(1, int(timeout) // 60 + 1)}
-#SBATCH --partition={partition}
-
-{bwrap_cmd}
-"""
-        script_path = self.instance.workspace_dir / f".ns_hpc_slurm_{job_id}.sh"
-        script_path.write_text(script)
-
         result = subprocess.run(
-            ["sbatch", str(script_path)],
+            [
+                "sbatch",
+                "--wrap", bwrap_cmd,
+                "--output", str(stdout_path),
+                "--error", str(stderr_path),
+                "--job-name", f"ns-hpc-{job_id[:8]}",
+                "--time", str(max(1, int(timeout) // 60 + 1)),
+                "--partition", self.config.slurm.partition,
+            ],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode != 0:
@@ -339,7 +322,7 @@ class JobManager:
 
         started_at = time.monotonic()
         self._jobs[job_id] = {
-            "command": raw_command,
+            "command": command,
             "mode": "slurm",
             "status": "running",
             "pid": None,
@@ -414,7 +397,7 @@ class JobManager:
 
         if timeout > 0 and proc.poll() is None:
             try:
-                proc.communicate(timeout=timeout)
+                proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 elapsed = time.monotonic() - started_at
                 return JobResult(
@@ -548,13 +531,8 @@ class JobManager:
             proc = self._procs.get(job_id)
             if proc and proc.poll() is None:
                 # bwrap runs as PID 1 and ignores SIGTERM; SIGKILL is required.
-                # Child processes inherit pipe fds, so communicate() after kill
-                # can hang. Use a short timeout, then fall back to wait().
                 proc.kill()
-                try:
-                    proc.communicate(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.wait()
+                proc.wait()
             self._procs.pop(job_id, None)
             self._jobs.pop(job_id, None)
             self._save_jobs()

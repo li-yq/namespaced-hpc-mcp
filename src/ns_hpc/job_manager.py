@@ -155,30 +155,35 @@ class JobManager:
     def _fixup_stale_jobs(self) -> None:
         """After restart, reconcile local jobs via status files.
 
-        When ``status_fd`` is configured: check the on-disk status file.
-        If the final ``exit-code`` line exists the job is complete.
-        Otherwise it was killed by ``--die-with-parent`` on restart -> unknown.
-
-        Without ``status_fd``: local 'running' entries are orphaned -> unknown.
+        When the status file shows ``exit-code`` the job is complete.
+        When it shows ``child-pid`` but no ``exit-code``, check ``/proc``
+        to see if the bwrap process is still alive (guard against PID
+        reuse by verifying ``comm`` and the file descriptor link).
         """
         changed = False
         status_fd = self.config.namespace_defaults.status_fd
-        has_status_fd = status_fd is not None
 
         for entry in self._jobs.values():
             if entry.get("mode") != "local" or entry.get("status") != "running":
                 continue
 
-            if has_status_fd and "status_path" in entry:
+            if "status_path" in entry:
                 finished, exit_code, _ = self._read_status_file(Path(entry["status_path"]))
                 if finished:
                     entry["status"] = "completed" if exit_code == 0 else "failed"
                     entry["exit_code"] = exit_code
-                else:
+                    changed = True
+                elif not self._is_bwrap_alive(
+                    entry.get("pid", -1),
+                    status_fd,
+                    entry["status_path"],
+                ):
                     entry["status"] = "unknown"
+                    changed = True
+                # else: still legitimately running — keep status, no change
             else:
                 entry["status"] = "unknown"
-            changed = True
+                changed = True
 
         if changed:
             self._save_jobs()
@@ -234,6 +239,35 @@ class JobManager:
         """Seconds since the job's ``created_at`` timestamp."""
         created = datetime.fromisoformat(entry["created_at"])
         return (datetime.now(timezone.utc) - created).total_seconds()
+
+    @staticmethod
+    def _is_bwrap_alive(pid: int, status_fd: int, status_path: str) -> bool:
+        """Check if a bwrap process with the given fd is still alive.
+
+        Verifies two things to guard against PID reuse:
+          1. ``/proc/<pid>/comm`` is ``"bwrap"``
+          2. ``/proc/<pid>/fd/<status_fd>`` → ``status_path``
+
+        Returns ``True`` only when both checks pass.
+        """
+        try:
+            proc_dir = Path(f"/proc/{pid}")
+            if not proc_dir.exists():
+                return False
+
+            # Check process name — a reused PID's comm won't be "bwrap"
+            comm = (proc_dir / "comm").read_text().strip()
+            if comm != "bwrap":
+                return False
+
+            # Check that the status fd points to our expected file
+            fd_path = proc_dir / "fd" / str(status_fd)
+            if not fd_path.exists():
+                return False
+
+            return os.readlink(str(fd_path)) == status_path
+        except (OSError, FileNotFoundError, IOError):
+            return False
 
     # ── Submit ───────────────────────────────────────────────────────────
 

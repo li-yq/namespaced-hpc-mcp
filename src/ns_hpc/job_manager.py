@@ -452,7 +452,7 @@ class JobManager:
 
         try:
             result = subprocess.run(
-                ["sacct", "-j", str(slurm_job_id), "--json"],
+                ["sacct", "-j", str(slurm_job_id), "--json", "-X"],
                 capture_output=True, text=True, timeout=30,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):

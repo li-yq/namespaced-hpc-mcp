@@ -247,7 +247,7 @@ class SlurmTaskEngine:
         # Poll via sacct
         try:
             result = subprocess.run(
-                ["sacct", "-j", str(handle.slurm_job_id), "--json"],
+                ["sacct", "-j", str(handle.slurm_job_id), "--json", "-X"],
                 capture_output=True,
                 text=True,
                 timeout=30,

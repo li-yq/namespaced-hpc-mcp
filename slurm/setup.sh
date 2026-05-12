@@ -56,7 +56,7 @@ UV="/usr/local/bin/uv"
 echo "=== Installing ns-hpc ==="
 # uv venv creates parent directories automatically
 podman exec --user testuser -w /home/testuser slurm-slurmctld \
-    "$UV" venv "$VENV"
+    "$UV" venv "$VENV" --clear
 
 podman exec --user testuser -w /home/testuser slurm-slurmctld \
     sh -c "VIRTUAL_ENV=$VENV $UV pip install -e /ns-hpc-mcp --quiet"

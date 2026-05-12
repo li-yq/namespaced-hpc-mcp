@@ -72,11 +72,23 @@ def _default_config() -> Config:
 
 
 def load_config(path: str | Path | None = None) -> Config:
+    # 1. Use provided path or NS_HPC_CONFIG env var
     if path is None:
-        path = os.environ.get("NS_HPC_CONFIG", "config/config.toml")
-    path = Path(path)
-    if not path.exists():
-        return _default_config()
-    raw = path.read_bytes()
-    data = tomli.loads(raw.decode())
-    return Config.model_validate(data)
+        path = os.environ.get("NS_HPC_CONFIG")
+
+    if path is not None:
+        p = Path(path)
+        if p.exists():
+            raw = p.read_bytes()
+            data = tomli.loads(raw.decode())
+            return Config.model_validate(data)
+
+    # 2. Fallback to user-level config
+    user_config = Path("~/.local/ns-hpc/config.toml").expanduser()
+    if user_config.exists():
+        raw = user_config.read_bytes()
+        data = tomli.loads(raw.decode())
+        return Config.model_validate(data)
+
+    # 3. Built-in defaults
+    return _default_config()

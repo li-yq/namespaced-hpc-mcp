@@ -683,6 +683,7 @@ class JobManager:
                 "status": status,
                 "command": entry.get("command", ""),
                 "mode": entry.get("mode", "local"),
+                "slurm_job_id": entry.get("slurm_job_id"),
                 "created_at": entry.get("created_at", ""),
             })
 

@@ -216,7 +216,7 @@ class JobManager:
         self,
         job_id: str,
         raw_command: str,
-        wrapped_command: str,
+        _wrapped_command: str,
         stdout_path: Path,
         stderr_path: Path,
         timeout: float,

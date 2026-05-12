@@ -56,7 +56,7 @@ class CreateInstanceInput(BaseModel):
 async def create_instance(input: CreateInstanceInput) -> str:
     """Create a new sandbox instance with a persistent workspace directory."""
     ctx = mcp.get_context()
-    context: ServerContext = ctx.lifespan_context
+    context: ServerContext = ctx.request_context.lifespan_context
 
     try:
         instance = Instance.create(input.instance_id, context.config)
@@ -77,7 +77,7 @@ class ListInstancesInput(BaseModel):
 async def list_instances(input: ListInstancesInput) -> str:
     """List all existing sandbox instances."""
     ctx = mcp.get_context()
-    context: ServerContext = ctx.lifespan_context
+    context: ServerContext = ctx.request_context.lifespan_context
 
     instances = Instance.list_instances(context.config)
     if not instances:
@@ -107,7 +107,7 @@ class DestroyInstanceInput(BaseModel):
 async def destroy_instance(input: DestroyInstanceInput) -> str:
     """Destroy a sandbox instance and remove its workspace directory."""
     ctx = mcp.get_context()
-    context: ServerContext = ctx.lifespan_context
+    context: ServerContext = ctx.request_context.lifespan_context
 
     if not Instance.load(input.instance_id, context.config):
         return f"Error: Instance '{input.instance_id}' not found"
@@ -159,7 +159,7 @@ async def submit_job(input: SubmitJobInput) -> str:
     in the background.  Use ``poll_job`` to check on it later.
     """
     ctx = mcp.get_context()
-    config: Config = ctx.lifespan_context.config
+    config: Config = ctx.request_context.lifespan_context.config
 
     instance = Instance.load(input.instance_id, config)
     if instance is None:
@@ -222,7 +222,7 @@ async def poll_job(input: PollJobInput) -> str:
     Same timeout/detach semantics as submit_job.
     """
     ctx = mcp.get_context()
-    config: Config = ctx.lifespan_context.config
+    config: Config = ctx.request_context.lifespan_context.config
 
     instance = Instance.load(input.instance_id, config)
     if instance is None:
@@ -258,7 +258,7 @@ class ListJobsInput(BaseModel):
 async def list_jobs(input: ListJobsInput) -> str:
     """List all tracked jobs for an instance."""
     ctx = mcp.get_context()
-    config: Config = ctx.lifespan_context.config
+    config: Config = ctx.request_context.lifespan_context.config
 
     instance = Instance.load(input.instance_id, config)
     if instance is None:
@@ -280,7 +280,7 @@ class CancelJobInput(BaseModel):
 async def cancel_job(input: CancelJobInput) -> str:
     """Cancel a running job."""
     ctx = mcp.get_context()
-    config: Config = ctx.lifespan_context.config
+    config: Config = ctx.request_context.lifespan_context.config
 
     instance = Instance.load(input.instance_id, config)
     if instance is None:

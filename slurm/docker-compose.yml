@@ -65,7 +65,7 @@ services:
       - slurm_etc_slurm:/etc/slurm:z
       - slurm_var_log_slurm:/var/log/slurm:z
       - ..:/ns-hpc-mcp:ro,z
-      - slurm_jobdir:/data:z
+      - slurm_jobdir:/home/testuser:z
     expose:
       - "6817"
     depends_on:
@@ -106,7 +106,7 @@ services:
       - slurm_etc_slurm:/etc/slurm
       - slurm_var_log_slurm:/var/log/slurm
       - ..:/ns-hpc-mcp:ro,z
-      - slurm_jobdir:/data:z
+      - slurm_jobdir:/home/testuser:z
     expose:
       - "6818"
     depends_on:

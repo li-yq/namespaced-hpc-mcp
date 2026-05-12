@@ -270,13 +270,12 @@ async def cancel_job(input: CancelJobInput) -> str:
 # ── Entry point ────────────────────────────────────────────────────────────
 
 
-def run_server(config_path: str | None = None, port: int = 8001) -> None:
+def run_server(config_path: str | None = None) -> None:
     """Start the MCP server over stdio.
 
     This is the entry point called from the CLI.
 
     Args:
         config_path: Optional override for the config.toml path.
-        port: Ignored in stdio mode; kept for API compatibility.
     """
     mcp.run(transport="stdio")

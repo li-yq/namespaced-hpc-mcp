@@ -32,13 +32,11 @@ def main(
 
 
 @app.command()
-def run(
-    port: int = typer.Option(8000, "--port", "-p", help="Port for the MCP server"),
-):
-    """Start the MCP server."""
+def run():
+    """Start the MCP server (stdio)."""
     from ns_hpc.server import run_server
 
-    run_server(port=port)
+    run_server()
 
 
 @app.command()

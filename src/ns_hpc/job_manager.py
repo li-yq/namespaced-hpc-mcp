@@ -131,6 +131,7 @@ class JobManager:
         # Disk-persisted job metadata
         self._jobs_path = instance.workspace_dir / ".ns_hpc_jobs.json"
         self._jobs = self._load_jobs()
+        self._fixup_stale_jobs()
 
     # ── Persistence ──────────────────────────────────────────────────────
 
@@ -149,6 +150,16 @@ class JobManager:
         tmp = self._jobs_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self._jobs, indent=2))
         os.replace(tmp, self._jobs_path)
+
+    def _fixup_stale_jobs(self) -> None:
+        """After restart, mark local 'running' jobs as UNKNOWN (PIDs are gone)."""
+        changed = False
+        for entry in self._jobs.values():
+            if entry.get("mode") == "local" and entry.get("status") == "running":
+                entry["status"] = "unknown"
+                changed = True
+        if changed:
+            self._save_jobs()
 
     # ── Job ID & output dir ──────────────────────────────────────────────
 

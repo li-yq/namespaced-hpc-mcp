@@ -1,5 +1,6 @@
 """Tests for the job manager module."""
 
+import json
 import os
 import tempfile
 import time
@@ -179,3 +180,29 @@ def test_submit_isolation(tmp_path, monkeypatch):
     # /etc/passwd is --ro-bind mounted, so it's accessible
     # But /tmp/host_secret should not be
     assert "EXPOSED" in result.stdout_tail or "SAFE" in result.stdout_tail
+
+
+def test_audit_log_written_for_completed_job(tmp_path, monkeypatch):
+    """Verify audit.log is populated after job completion."""
+    cfg = _config(str(tmp_path), monkeypatch)
+    inst = _instance(cfg)
+    mgr = JobManager(inst, cfg)
+
+    result = mgr.submit("echo hello_audit", timeout=10, tail=5)
+    assert result.status == JobStatus.COMPLETED
+
+    # Call audit as the CLI/MCP layers would
+    inst.audit(
+        f"job.{result.status.value}",
+        job_id=result.job_id, exit_code=result.exit_code,
+        command="echo hello_audit", mode="local",
+        stdout_path=result.stdout_path, stderr_path=result.stderr_path,
+    )
+
+    lines = inst.audit_log_path.read_text().strip().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["event"] == "job.completed"
+    assert entry["exit_code"] == 0
+    assert entry["job_id"] == result.job_id
+    assert entry["mode"] == "local"

@@ -147,9 +147,12 @@ def run(
         raise typer.Exit(code=1)
 
     mgr = JobManager(inst, cfg)
+    cmd_str = " ".join(command)
+    mode_str = "slurm" if slurm else "local"
+    inst.audit("job.submitted", command=cmd_str, mode=mode_str, timeout=timeout)
     result = mgr.submit(
-        " ".join(command),
-        mode="slurm" if slurm else "local",
+        cmd_str,
+        mode=mode_str,
         timeout=timeout,
         tail=tail,
     )
@@ -157,6 +160,16 @@ def run(
     # Handle detach
     if result.status == "running" and not detach:
         mgr.cancel_and_tail(result, tail)
+
+    # Audit outcome
+    if result.status == JobStatus.RUNNING:
+        inst.audit("job.running", job_id=result.job_id, command=cmd_str,
+                   mode=mode_str, detached=True, timeout=timeout,
+                   stdout_path=result.stdout_path, stderr_path=result.stderr_path)
+    else:
+        inst.audit(f"job.{result.status.value}", job_id=result.job_id,
+                   exit_code=result.exit_code, command=cmd_str, mode=mode_str,
+                   stdout_path=result.stdout_path, stderr_path=result.stderr_path)
 
     print(f"Job {result.job_id}: {result.status.value}")
     if result.exit_code is not None:
@@ -197,6 +210,16 @@ def status(
 
     if result.status == "running" and not detach and timeout > 0:
         mgr.cancel_and_tail(result, tail)
+
+    # Audit outcome
+    if result.status == JobStatus.RUNNING:
+        inst.audit("job.running", job_id=result.job_id,
+                   detached=bool(detach), poll_timeout=timeout,
+                   stdout_path=result.stdout_path, stderr_path=result.stderr_path)
+    elif result.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.TIMEOUT):
+        inst.audit(f"job.{result.status.value}", job_id=result.job_id,
+                   exit_code=result.exit_code,
+                   stdout_path=result.stdout_path, stderr_path=result.stderr_path)
 
     print(f"Job {result.job_id}: {result.status.value}")
     if result.exit_code is not None:
@@ -244,6 +267,7 @@ def cancel(
     mgr = JobManager(inst, cfg)
     ok = mgr.cancel(job_id)
     if ok:
+        inst.audit("job.cancelled", job_id=job_id)
         print(f"Cancelled job {job_id}.")
     else:
         print(f"Job '{job_id}' not found.")

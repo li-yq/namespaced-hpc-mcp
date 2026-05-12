@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -98,44 +97,28 @@ class Instance:
 
     # ── Audit logging ────────────────────────────────────────────────────
 
-    def _ensure_output_dir(self) -> Path:
-        """Create the output directory if it doesn't exist."""
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        return self.output_dir
+    def audit(self, event: str, **data: object) -> None:
+        """Append a JSONL event to the audit log.
 
-    def audit(self, command: str, exit_code: int,
-              stdout: str = "", stderr: str = "") -> str:
-        """Record a command execution: write output files and log entry.
+        The audit log is a line-delimited JSON file (``audit.log``) in the
+        instance directory.  Each line is one event with at minimum an
+        ``event`` type and a ``timestamp``, plus whatever extra fields the
+        caller supplies.
 
-        Creates a unique task ID, writes stdout/stderr to
-        ``{output_dir}/{task_id}.{out,err}``, and appends a JSON line to
-        the audit log containing all metadata.
+        Example::
+
+            inst.audit("job.completed", job_id="abc", exit_code=0,
+                       command="echo hello")
 
         Args:
-            command: The shell command that was executed.
-            exit_code: The command's exit code.
-            stdout: Standard output text.
-            stderr: Standard error text.
-
-        Returns:
-            The generated task ID.
+            event: Event type identifier (e.g. ``"job.submitted"``,
+                   ``"instance.created"``, ``"job.completed"``).
+            **data: Arbitrary key-value pairs to include in the log entry.
         """
-        task_id = uuid.uuid4().hex[:12]
-        self._ensure_output_dir()
-        (self.output_dir / f"{task_id}.out").write_text(stdout or "")
-        (self.output_dir / f"{task_id}.err").write_text(stderr or "")
-
         entry = {
-            "task_id": task_id,
+            "event": event,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "command": command,
-            "exit_code": exit_code,
-            "stdout_path": str(self.output_dir / f"{task_id}.out"),
-            "stderr_path": str(self.output_dir / f"{task_id}.err"),
-            "stdout_len": len(stdout or ""),
-            "stderr_len": len(stderr or ""),
+            **data,
         }
         with open(self.audit_log_path, "a") as f:
             f.write(json.dumps(entry) + "\n")
-
-        return task_id

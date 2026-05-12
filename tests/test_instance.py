@@ -55,23 +55,40 @@ def test_load_nonexistent(tmp_path):
 
 
 def test_audit(tmp_path):
+    """audit() appends a JSONL line with event type and extra fields."""
     cfg = _config(str(tmp_path))
     inst = Instance.create("test-003", cfg)
-    task_id = inst.audit("echo hello", 0, stdout="hello\n", stderr="")
-    assert task_id is not None
-    assert len(task_id) == 12
-    # Output files created
-    out_file = inst.output_dir / f"{task_id}.out"
-    err_file = inst.output_dir / f"{task_id}.err"
-    assert out_file.read_text() == "hello\n"
-    assert err_file.read_text() == ""
-    # Audit log written
-    log = inst.audit_log_path.read_text()
-    entry = json.loads(log.strip())
-    assert entry["task_id"] == task_id
-    assert entry["command"] == "echo hello"
-    assert entry["exit_code"] == 0
-    assert entry["stdout_len"] == 6
+    inst.audit("job.completed", job_id="abc123", exit_code=0, command="echo hello")
+    inst.audit("job.failed", job_id="def456", exit_code=1, command="false")
+
+    lines = inst.audit_log_path.read_text().strip().splitlines()
+    assert len(lines) == 2
+
+    e1 = json.loads(lines[0])
+    assert e1["event"] == "job.completed"
+    assert e1["job_id"] == "abc123"
+    assert e1["exit_code"] == 0
+    assert "timestamp" in e1
+
+    e2 = json.loads(lines[1])
+    assert e2["event"] == "job.failed"
+    assert e2["job_id"] == "def456"
+    assert e2["exit_code"] == 1
+
+
+def test_audit_arbitrary_fields(tmp_path):
+    """audit() accepts arbitrary keyword arguments."""
+    cfg = _config(str(tmp_path))
+    inst = Instance.create("test-007", cfg)
+
+    inst.audit("custom.event", foo="bar", count=42, nested={"key": "val"})
+    line = inst.audit_log_path.read_text().strip()
+    entry = json.loads(line)
+
+    assert entry["event"] == "custom.event"
+    assert entry["foo"] == "bar"
+    assert entry["count"] == 42
+    assert entry["nested"] == {"key": "val"}
 
 
 def test_destroy_instance(tmp_path):

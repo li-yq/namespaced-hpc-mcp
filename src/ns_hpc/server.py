@@ -166,6 +166,8 @@ async def submit_job(input: SubmitJobInput) -> str:
         return json.dumps({"error": f"Instance '{input.instance_id}' not found"})
 
     mgr = JobManager(instance, config)
+    instance.audit("job.submitted", command=input.command, mode=input.mode,
+                   timeout=input.timeout)
     result = mgr.submit(
         input.command,
         mode=input.mode,
@@ -176,6 +178,18 @@ async def submit_job(input: SubmitJobInput) -> str:
     # Handle detach: if still running after timeout, keep it running
     if result.status == JobStatus.RUNNING and not input.detach:
         mgr.cancel_and_tail(result, input.tail)
+
+    # Audit outcome
+    if result.status == JobStatus.RUNNING:
+        instance.audit("job.running", job_id=result.job_id,
+                       command=input.command, mode=input.mode,
+                       detached=input.detach, timeout=input.timeout,
+                       stdout_path=result.stdout_path, stderr_path=result.stderr_path)
+    else:
+        instance.audit(f"job.{result.status.value}", job_id=result.job_id,
+                       exit_code=result.exit_code, command=input.command,
+                       mode=input.mode,
+                       stdout_path=result.stdout_path, stderr_path=result.stderr_path)
 
     return json.dumps(result.to_dict(), indent=2)
 
@@ -223,6 +237,16 @@ async def poll_job(input: PollJobInput) -> str:
     if result.status == JobStatus.RUNNING and not input.detach:
         mgr.cancel_and_tail(result, input.tail)
 
+    # Audit outcome
+    if result.status == JobStatus.RUNNING:
+        instance.audit("job.running", job_id=result.job_id,
+                       detached=input.detach, poll_timeout=input.timeout,
+                       stdout_path=result.stdout_path, stderr_path=result.stderr_path)
+    elif result.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.TIMEOUT):
+        instance.audit(f"job.{result.status.value}", job_id=result.job_id,
+                       exit_code=result.exit_code,
+                       stdout_path=result.stdout_path, stderr_path=result.stderr_path)
+
     return json.dumps(result.to_dict(), indent=2)
 
 
@@ -264,6 +288,8 @@ async def cancel_job(input: CancelJobInput) -> str:
 
     mgr = JobManager(instance, config)
     ok = mgr.cancel(input.job_id)
+    if ok:
+        instance.audit("job.cancelled", job_id=input.job_id)
     return json.dumps({"job_id": input.job_id, "cancelled": ok})
 
 

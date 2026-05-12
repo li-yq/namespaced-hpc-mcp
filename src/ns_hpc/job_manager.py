@@ -355,17 +355,20 @@ class JobManager:
             f"/bin/sh -c {shlex.quote(command)}"
         )
 
-        result = subprocess.run(
-            [
-                "sbatch",
-                "--wrap", bwrap_cmd,
-                "--output", str(stdout_path),
-                "--error", str(stderr_path),
-                "--job-name", f"ns-hpc-{job_id[:8]}",
-                "--partition", self.config.slurm.partition,
-            ],
-            capture_output=True, text=True, timeout=30,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    "sbatch",
+                    "--wrap", bwrap_cmd,
+                    "--output", str(stdout_path),
+                    "--error", str(stderr_path),
+                    "--job-name", f"ns-hpc-{job_id[:8]}",
+                    "--partition", self.config.slurm.partition,
+                ],
+                capture_output=True, text=True, timeout=30,
+            )
+        except FileNotFoundError:
+            raise RuntimeError("slurm scheduler is not available")
         if result.returncode != 0:
             raise RuntimeError(f"sbatch failed: {result.stderr.strip()}")
 
@@ -492,11 +495,13 @@ class JobManager:
                 ["sacct", "-j", str(slurm_job_id), "--json", "-X"],
                 capture_output=True, text=True, timeout=30,
             )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return ("UNKNOWN", None)
+        except FileNotFoundError:
+            raise RuntimeError("slurm scheduler is not available")
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("slurm query timed out")
 
         if result.returncode != 0:
-            return ("UNKNOWN", None)
+            raise RuntimeError("slurm query failed")
 
         try:
             data = json.loads(result.stdout)

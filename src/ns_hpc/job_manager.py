@@ -427,6 +427,33 @@ class JobManager:
             job_id, proc, stdout_path, stderr_path, tail, elapsed,
         )
 
+    def _slurm_job_state(self, slurm_job_id: int) -> tuple[str, int | None]:
+        """Query sacct and return (state, exit_code) for a Slurm job."""
+        try:
+            result = subprocess.run(
+                ["sacct", "-j", str(slurm_job_id), "--json", "-X"],
+                capture_output=True, text=True, timeout=30,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return ("UNKNOWN", None)
+
+        if result.returncode != 0:
+            return ("UNKNOWN", None)
+
+        try:
+            data = json.loads(result.stdout)
+            jobs = data.get("jobs", [])
+        except (json.JSONDecodeError, TypeError):
+            jobs = []
+
+        for job in jobs:
+            state = _parse_slurm_state(job)
+            ec = _parse_slurm_exit_code(job)
+            if state:
+                return (state, ec)
+
+        return ("UNKNOWN", None)
+
     def _poll_slurm(
         self,
         job_id: str,
@@ -444,78 +471,29 @@ class JobManager:
                 stdout_path=str(stdout_path), stderr_path=str(stderr_path),
             )
 
-        try:
-            result = subprocess.run(
-                ["sacct", "-j", str(slurm_job_id), "--json", "-X"],
-                capture_output=True, text=True, timeout=30,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            entry["status"] = "unknown"
+        state, ec = self._slurm_job_state(slurm_job_id)
+
+        if state in ("COMPLETED",):
+            self._jobs.pop(job_id, None)
             self._save_jobs()
             return JobResult(
-                job_id=job_id, status=JobStatus.UNKNOWN,
+                job_id=job_id, status=JobStatus.COMPLETED,
+                exit_code=ec if ec is not None else 0,
+                stdout_tail=_tail_file(stdout_path, tail),
+                stderr_tail=_tail_file(stderr_path, tail),
+                stdout_path=str(stdout_path), stderr_path=str(stderr_path),
+            )
+        elif state in ("FAILED", "TIMEOUT", "NODE_FAIL", "CANCELLED"):
+            self._jobs.pop(job_id, None)
+            self._save_jobs()
+            return JobResult(
+                job_id=job_id, status=JobStatus.FAILED,
+                exit_code=ec if ec is not None else -1,
                 stdout_path=str(stdout_path), stderr_path=str(stderr_path),
             )
 
-        if result.returncode != 0:
-            entry["status"] = "unknown"
-            self._save_jobs()
-            return JobResult(
-                job_id=job_id, status=JobStatus.UNKNOWN,
-                stdout_path=str(stdout_path), stderr_path=str(stderr_path),
-            )
-
-        try:
-            data = json.loads(result.stdout)
-            jobs = data.get("jobs", [])
-        except (json.JSONDecodeError, TypeError):
-            jobs = []
-
-        matched = 0
-        final_result: Optional[JobResult] = None
-
-        for job in jobs:
-            state = _parse_slurm_state(job)
-            ec = _parse_slurm_exit_code(job)
-
-            if state in ("COMPLETED",):
-                ec = ec if ec is not None else 0
-                self._jobs.pop(job_id, None)
-                self._save_jobs()
-                final_result = JobResult(
-                    job_id=job_id, status=JobStatus.COMPLETED,
-                    exit_code=ec,
-                    stdout_tail=_tail_file(stdout_path, tail),
-                    stderr_tail=_tail_file(stderr_path, tail),
-                    stdout_path=str(stdout_path),
-                    stderr_path=str(stderr_path),
-                )
-                matched += 1
-            elif state in ("FAILED", "TIMEOUT", "NODE_FAIL", "CANCELLED"):
-                self._jobs.pop(job_id, None)
-                self._save_jobs()
-                final_result = JobResult(
-                    job_id=job_id, status=JobStatus.FAILED,
-                    exit_code=ec if ec is not None else -1,
-                    stdout_path=str(stdout_path), stderr_path=str(stderr_path),
-                )
-                matched += 1
-
-        if matched > 1:
-            print(f"Warning: sacct returned {matched} results for job {slurm_job_id}", file=sys.stderr)
-
-        if matched == 0:
-            entry["status"] = "unknown"
-            self._save_jobs()
-            return JobResult(
-                job_id=job_id, status=JobStatus.UNKNOWN,
-                stdout_path=str(stdout_path), stderr_path=str(stderr_path),
-            )
-
-        if final_result is not None:
-            return final_result
-
-        # Should not reach here
+        entry["status"] = "unknown"
+        self._save_jobs()
         return JobResult(
             job_id=job_id, status=JobStatus.UNKNOWN,
             stdout_path=str(stdout_path), stderr_path=str(stderr_path),

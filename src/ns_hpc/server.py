@@ -5,7 +5,6 @@ import json
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import AsyncIterator
 
 from mcp.server.fastmcp import FastMCP
@@ -13,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from ns_hpc.config import Config, load_config
 from ns_hpc.instance import Instance
-from ns_hpc.job_manager import JobManager, JobStatus, _tail_file
+from ns_hpc.job_manager import JobManager, JobStatus
 
 
 @dataclass
@@ -176,11 +175,7 @@ async def submit_job(input: SubmitJobInput) -> str:
 
     # Handle detach: if still running after timeout, keep it running
     if result.status == JobStatus.RUNNING and not input.detach:
-        mgr.cancel(result.job_id)
-        # Re-read tail after kill
-        result.stdout_tail = _tail_file(Path(result.stdout_path), input.tail)
-        result.stderr_tail = _tail_file(Path(result.stderr_path), input.tail)
-        result.status = JobStatus.TIMEOUT
+        mgr.cancel_and_tail(result, input.tail)
 
     return json.dumps(result.to_dict(), indent=2)
 
@@ -226,10 +221,7 @@ async def poll_job(input: PollJobInput) -> str:
         return json.dumps({"error": f"Job '{input.job_id}' not found or already finished"})
 
     if result.status == JobStatus.RUNNING and not input.detach:
-        mgr.cancel(result.job_id)
-        result.stdout_tail = _tail_file(Path(result.stdout_path), input.tail)
-        result.stderr_tail = _tail_file(Path(result.stderr_path), input.tail)
-        result.status = JobStatus.TIMEOUT
+        mgr.cancel_and_tail(result, input.tail)
 
     return json.dumps(result.to_dict(), indent=2)
 

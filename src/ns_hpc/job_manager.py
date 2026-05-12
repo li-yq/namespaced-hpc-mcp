@@ -567,6 +567,14 @@ class JobManager:
             self._save_jobs()
             return True
 
+    def cancel_and_tail(self, result: JobResult, tail: int = 50) -> JobResult:
+        """Cancel a running job and set status to TIMEOUT with output tail."""
+        self.cancel(result.job_id)
+        result.stdout_tail = _tail_file(Path(result.stdout_path), tail)
+        result.stderr_tail = _tail_file(Path(result.stderr_path), tail)
+        result.status = JobStatus.TIMEOUT
+        return result
+
     def list_jobs(self) -> list[dict]:
         """List all tracked jobs from disk-persisted state."""
         result = []

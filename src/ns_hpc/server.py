@@ -312,11 +312,17 @@ async def list_jobs(input: ListJobsInput, ctx: Context) -> list:
 class CancelJobInput(BaseModel):
     instance_id: str = Field(..., description="Instance ID")
     job_id: str = Field(..., description="Job ID to cancel")
+    tail: int = Field(
+        default=50,
+        description="Number of tail lines to return from output",
+        ge=0,
+        le=1000,
+    )
 
 
 @mcp.tool()
 async def cancel_job(input: CancelJobInput, ctx: Context) -> dict:
-    """Cancel a running job."""
+    """Cancel a running job and return its final status and output tail."""
     config: Config = ctx.lifespan_context.config
 
     instance = Instance.load(input.instance_id, config)
@@ -327,6 +333,11 @@ async def cancel_job(input: CancelJobInput, ctx: Context) -> dict:
     ok = mgr.cancel(input.job_id)
     if ok:
         instance.audit("job.cancelled", job_id=input.job_id)
+
+    # Poll after cancel to capture final exit code and tail output
+    result = mgr.poll(input.job_id, tail=input.tail)
+    if result is not None:
+        return result.to_dict()
     return {"job_id": input.job_id, "cancelled": ok}
 
 

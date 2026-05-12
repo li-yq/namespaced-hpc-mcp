@@ -53,7 +53,6 @@ class JobStatus(str, Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     TIMEOUT = "timeout"
-    ABORTED = "aborted"
     UNKNOWN = "unknown"
 
 
@@ -162,7 +161,7 @@ class JobManager:
         * If ``config.job.proc_check`` is enabled (default), verify
           whether the bwrap process is alive via ``/proc`` (guarding
           against PID reuse).  If alive the job keeps running.
-        * Otherwise mark the job ``ABORTED`` — the sandbox was killed
+        * Otherwise mark the job ``FAILED`` — the sandbox was killed
           by ``--die-with-parent`` when the parent process exited.
         """
         changed = False
@@ -185,7 +184,7 @@ class JobManager:
                 ):
                     pass  # still legitimately running
                 else:
-                    entry["status"] = "aborted"
+                    entry["status"] = "failed"
                     changed = True
             else:
                 entry["status"] = "unknown"
@@ -292,13 +291,15 @@ class JobManager:
         """
         job_id = self._next_job_id()
         output_dir = self._ensure_output_dir()
+        status_fd = self.config.namespace_defaults.status_fd
         stdout_path = output_dir / f"{job_id}.out"
         stderr_path = output_dir / f"{job_id}.err"
+        status_path = output_dir / f"{job_id}.status"
 
         if mode == "local":
-            self._submit_local(job_id, command, stdout_path, stderr_path)
+            self._submit_local(job_id, command, stdout_path, stderr_path, status_path)
         elif mode == "slurm":
-            self._submit_slurm(job_id, command, stdout_path, stderr_path)
+            self._submit_slurm(job_id, command, stdout_path, stderr_path, status_path)
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
@@ -310,10 +311,10 @@ class JobManager:
         command: str,
         stdout_path: Path,
         stderr_path: Path,
+        status_path: Path,
     ) -> None:
         """Start a local bwrap job and persist its entry.  Does not wait."""
         status_fd = self.config.namespace_defaults.status_fd
-        status_path = (stdout_path.parent / f"{job_id}.status").resolve()
 
         # sh -c '<python> -m ns_hpc bwrap <id> -- ... ><out> 2><err> <n>><status>'
         shell_cmd = (
@@ -346,6 +347,7 @@ class JobManager:
         command: str,
         stdout_path: Path,
         stderr_path: Path,
+        status_path: Path,
     ) -> None:
         """Submit via sbatch and persist the entry.  Does not wait."""
         bwrap_cmd = (
@@ -398,7 +400,7 @@ class JobManager:
             return None
 
         status = entry.get("status")
-        if status in ("completed", "failed", "cancelled", "timeout", "aborted", "unknown"):
+        if status in ("completed", "failed", "cancelled", "timeout", "unknown"):
             return self._result_from_entry(job_id, entry, tail)
 
         if entry["mode"] == "local":

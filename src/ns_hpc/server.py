@@ -143,7 +143,7 @@ class SubmitJobInput(BaseModel):
         le=86400,
     )
     detach: bool = Field(
-        default=False,
+        default=True,
         description="If True, keep job running past timeout instead of killing",
     )
     tail: int = Field(
@@ -213,7 +213,7 @@ class PollJobInput(BaseModel):
         le=3600,
     )
     detach: bool = Field(
-        default=False,
+        default=True,
         description="If True and job still running after timeout, keep it",
     )
     tail: int = Field(

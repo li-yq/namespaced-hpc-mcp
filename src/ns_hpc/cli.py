@@ -132,16 +132,16 @@ def create(
 def run(
     instance_id: str = typer.Argument(help="Instance ID"),
     command: list[str] = typer.Argument(help="Command and arguments"),
-    detach: bool = typer.Option(False, "--detach", help="Keep running past timeout"),
+    detach: bool = typer.Option(True, "--detach/--no-detach", help="Keep running past timeout"),
     slurm: bool = typer.Option(False, "--slurm", help="Submit via sbatch"),
     timeout: int = typer.Option(60, "--timeout", "-t", help="Max wait in seconds"),
     tail: int = typer.Option(50, "--tail", help="Tail lines to show"),
 ):
     """Run a command as an async job. Waits up to --timeout seconds.
 
-    By default (without --detach), if the command exceeds --timeout
-    it is killed.  With --detach, it keeps running and you can poll
-    later with 'ns-hpc instance status'.
+    By default (with --detach), if the command exceeds --timeout it keeps
+    running and you can poll later with 'ns-hpc instance status'.
+    Use --no-detach to kill the job on timeout instead.
     """
     cfg = load_config()
     inst = Instance.load(instance_id, cfg)
@@ -194,7 +194,7 @@ def status(
     instance_id: str = typer.Argument(help="Instance ID"),
     job_id: str = typer.Argument(help="Job ID"),
     timeout: int = typer.Option(0, "--timeout", "-t", help="Seconds to wait"),
-    detach: bool = typer.Option(False, "--detach", help="Keep running past timeout"),
+    detach: bool = typer.Option(True, "--detach/--no-detach", help="Keep running past timeout"),
     tail: int = typer.Option(50, "--tail", help="Tail lines to show"),
 ):
     """Check the status of a running job."""

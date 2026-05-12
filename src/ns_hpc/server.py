@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import AsyncIterator
 
 from fastmcp import FastMCP, Context
@@ -19,6 +19,17 @@ from ns_hpc.job_manager import JobManager, JobStatus
 class ServerContext:
     """Lifespan context shared across MCP tools."""
     config: Config
+    job_managers: dict[str, JobManager] = field(default_factory=dict)
+
+
+def _get_manager(ctx: Context, instance: Instance) -> JobManager:
+    """Get or create a cached JobManager for the given instance."""
+    context: ServerContext = ctx.lifespan_context
+    mgr = context.job_managers.get(instance.id)
+    if mgr is None:
+        mgr = JobManager(instance, context.config)
+        context.job_managers[instance.id] = mgr
+    return mgr
 
 
 @asynccontextmanager
@@ -109,6 +120,7 @@ async def destroy_instance(input: DestroyInstanceInput, ctx: Context) -> str:
     if not Instance.load(input.instance_id, context.config):
         return f"Error: Instance '{input.instance_id}' not found"
 
+    context.job_managers.pop(input.instance_id, None)
     Instance.destroy(input.instance_id, context.config)
     return f"Instance '{input.instance_id}' destroyed."
 
@@ -161,7 +173,7 @@ async def submit_job(input: SubmitJobInput, ctx: Context) -> str:
     if instance is None:
         return json.dumps({"error": f"Instance '{input.instance_id}' not found"})
 
-    mgr = JobManager(instance, config)
+    mgr = _get_manager(ctx, instance)
     instance.audit("job.submitted", command=input.command, mode=input.mode,
                    timeout=input.timeout)
     result = mgr.submit(
@@ -223,7 +235,7 @@ async def poll_job(input: PollJobInput, ctx: Context) -> str:
     if instance is None:
         return json.dumps({"error": f"Instance '{input.instance_id}' not found"})
 
-    mgr = JobManager(instance, config)
+    mgr = _get_manager(ctx, instance)
     result = mgr.poll(input.job_id, timeout=input.timeout, tail=input.tail)
 
     if result is None:
@@ -258,7 +270,7 @@ async def list_jobs(input: ListJobsInput, ctx: Context) -> str:
     if instance is None:
         return json.dumps({"error": f"Instance '{input.instance_id}' not found"})
 
-    mgr = JobManager(instance, config)
+    mgr = _get_manager(ctx, instance)
     jobs = mgr.list_jobs()
     if not jobs:
         return json.dumps([])
@@ -279,7 +291,7 @@ async def cancel_job(input: CancelJobInput, ctx: Context) -> str:
     if instance is None:
         return json.dumps({"error": f"Instance '{input.instance_id}' not found"})
 
-    mgr = JobManager(instance, config)
+    mgr = _get_manager(ctx, instance)
     ok = mgr.cancel(input.job_id)
     if ok:
         instance.audit("job.cancelled", job_id=input.job_id)

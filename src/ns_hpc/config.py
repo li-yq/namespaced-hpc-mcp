@@ -9,6 +9,7 @@ class NamespaceDefaults(BaseModel):
     bind_ro: list[str]
     workspace_mount: str
     flags: list[str]
+    status_fd: int | None = None
 
 
 class ProxiedMCP(BaseModel):

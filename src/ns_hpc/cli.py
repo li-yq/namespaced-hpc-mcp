@@ -84,10 +84,19 @@ def bwrap(
         print(f"Error: instance '{instance_id}' not found.", file=sys.stderr)
         raise typer.Exit(code=1)
 
+    fd = cfg.namespace_defaults.status_fd
+    if fd is not None:
+        # Let bwrap write JSON status to this fd so the caller
+        # can redirect it alongside stdout/stderr.
+        extra_flags = ["--json-status-fd", str(fd)]
+    else:
+        extra_flags = None
+
     argv = build_bwrap_args(
         command=list(command),
         workspace_host_path=str(inst.workspace_dir),
         config=cfg,
+        extra_bwrap_flags=extra_flags,
     )
     os.execvp("bwrap", argv)
 

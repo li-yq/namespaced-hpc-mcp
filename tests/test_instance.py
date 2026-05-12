@@ -76,18 +76,6 @@ def test_audit():
     assert entry["stdout_len"] == 6
 
 
-def test_legacy_write_audit():
-    cfg = _config()
-    inst = Instance.create("test-004", cfg)
-    inst.write_audit("ls -la", {"exit_code": 0, "stdout": "file1", "stderr": ""})
-    log = inst.audit_log_path.read_text()
-    lines = log.strip().split("\n")
-    assert len(lines) == 1
-    entry = json.loads(lines[0])
-    assert entry["command"] == "ls -la"
-    assert entry["exit_code"] == 0
-
-
 def test_destroy_instance():
     cfg = _config()
     inst = Instance.create("test-005", cfg)

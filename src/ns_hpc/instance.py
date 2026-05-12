@@ -139,8 +139,3 @@ class Instance:
             f.write(json.dumps(entry) + "\n")
 
         return task_id
-
-    def write_audit(self, command: str, result: dict) -> None:
-        """Legacy wrapper for backward compatibility."""
-        self.audit(command, result.get("exit_code", -1),
-                   result.get("stdout", ""), result.get("stderr", ""))

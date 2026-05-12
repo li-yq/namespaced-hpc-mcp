@@ -1,15 +1,13 @@
 """Tests for the instance lifecycle module."""
 
 import json
-import os
-import tempfile
 from pathlib import Path
 
 from ns_hpc.instance import Instance
 from ns_hpc.config import Config, NamespaceDefaults, ResourceDefaults
 
 
-def _config(tmp_dir: str | None = None) -> Config:
+def _config(tmp_dir: str) -> Config:
     return Config(
         namespace_defaults=NamespaceDefaults(
             bind_ro=["/usr", "/bin"],
@@ -18,12 +16,12 @@ def _config(tmp_dir: str | None = None) -> Config:
         ),
         proxied_mcps={},
         resource_defaults=ResourceDefaults(),
-        instances_dir=tmp_dir or tempfile.mkdtemp(),
+        instances_dir=tmp_dir,
     )
 
 
-def test_create_instance():
-    cfg = _config()
+def test_create_instance(tmp_path):
+    cfg = _config(str(tmp_path))
     inst = Instance.create("test-001", cfg)
     assert inst.exists
     assert inst.workspace_dir.exists()
@@ -34,30 +32,30 @@ def test_create_instance():
     assert "created_at" in metadata
 
 
-def test_create_duplicate():
-    cfg = _config()
+def test_create_duplicate(tmp_path):
+    cfg = _config(str(tmp_path))
     Instance.create("test-dup", cfg)
     import pytest
     with pytest.raises(FileExistsError):
         Instance.create("test-dup", cfg)
 
 
-def test_load_instance():
-    cfg = _config()
+def test_load_instance(tmp_path):
+    cfg = _config(str(tmp_path))
     Instance.create("test-002", cfg)
     inst = Instance.load("test-002", cfg)
     assert inst is not None
     assert inst.id == "test-002"
 
 
-def test_load_nonexistent():
-    cfg = _config()
+def test_load_nonexistent(tmp_path):
+    cfg = _config(str(tmp_path))
     inst = Instance.load("does-not-exist", cfg)
     assert inst is None
 
 
-def test_audit():
-    cfg = _config()
+def test_audit(tmp_path):
+    cfg = _config(str(tmp_path))
     inst = Instance.create("test-003", cfg)
     task_id = inst.audit("echo hello", 0, stdout="hello\n", stderr="")
     assert task_id is not None
@@ -76,21 +74,21 @@ def test_audit():
     assert entry["stdout_len"] == 6
 
 
-def test_destroy_instance():
-    cfg = _config()
+def test_destroy_instance(tmp_path):
+    cfg = _config(str(tmp_path))
     inst = Instance.create("test-005", cfg)
     assert inst.exists
     assert Instance.destroy("test-005", cfg)
     assert not inst.exists
 
 
-def test_destroy_nonexistent():
-    cfg = _config()
+def test_destroy_nonexistent(tmp_path):
+    cfg = _config(str(tmp_path))
     assert not Instance.destroy("does-not-exist", cfg)
 
 
-def test_list_instances():
-    cfg = _config()
+def test_list_instances(tmp_path):
+    cfg = _config(str(tmp_path))
     Instance.create("list-a", cfg)
     Instance.create("list-b", cfg)
     instances = Instance.list_instances(cfg)

@@ -28,11 +28,10 @@ resource_patterns = ["*.md"]
 """
 
 
-def _config(tmp_dir: str | None = None) -> Config:
-    tmp_dir = tmp_dir or tempfile.mkdtemp()
+def _config(tmp_dir: str, monkeypatch) -> Config:
     config_path = Path(tmp_dir) / "config.toml"
     config_path.write_text(_CONFIG_TOML.format(instances_dir=tmp_dir))
-    os.environ["NS_HPC_CONFIG"] = str(config_path)
+    monkeypatch.setenv("NS_HPC_CONFIG", str(config_path))
     return load_config(str(config_path))
 
 
@@ -65,9 +64,9 @@ def test_tail_file_empty():
         tmp.unlink()
 
 
-def test_submit_and_complete():
+def test_submit_and_complete(tmp_path, monkeypatch):
     """Submit a quick command, verify it completes."""
-    cfg = _config()
+    cfg = _config(str(tmp_path), monkeypatch)
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
 
@@ -81,9 +80,9 @@ def test_submit_and_complete():
     assert "hello_job" in Path(result.stdout_path).read_text()
 
 
-def test_submit_exit_code():
+def test_submit_exit_code(tmp_path, monkeypatch):
     """Verify non-zero exit codes."""
-    cfg = _config()
+    cfg = _config(str(tmp_path), monkeypatch)
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
 
@@ -92,9 +91,9 @@ def test_submit_exit_code():
     assert result.exit_code == 42
 
 
-def test_submit_detach_timeout():
+def test_submit_detach_timeout(tmp_path, monkeypatch):
     """Submit a long command, timeout before completion, verify running."""
-    cfg = _config()
+    cfg = _config(str(tmp_path), monkeypatch)
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
 
@@ -107,9 +106,9 @@ def test_submit_detach_timeout():
     mgr.cancel(result.job_id)
 
 
-def test_poll_running_job():
+def test_poll_running_job(tmp_path, monkeypatch):
     """Submit long command, poll it while running."""
-    cfg = _config()
+    cfg = _config(str(tmp_path), monkeypatch)
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
 
@@ -126,9 +125,9 @@ def test_poll_running_job():
     assert mgr.poll(result.job_id, timeout=0) is None
 
 
-def test_list_jobs():
+def test_list_jobs(tmp_path, monkeypatch):
     """Submit two jobs, list them."""
-    cfg = _config()
+    cfg = _config(str(tmp_path), monkeypatch)
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
 
@@ -146,9 +145,9 @@ def test_list_jobs():
     mgr.cancel(r2.job_id)
 
 
-def test_cancel_running():
+def test_cancel_running(tmp_path, monkeypatch):
     """Submit a long command and cancel it."""
-    cfg = _config()
+    cfg = _config(str(tmp_path), monkeypatch)
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
 
@@ -159,16 +158,16 @@ def test_cancel_running():
     assert mgr.poll(result.job_id, timeout=0) is None
 
 
-def test_cancel_nonexistent():
-    cfg = _config()
+def test_cancel_nonexistent(tmp_path, monkeypatch):
+    cfg = _config(str(tmp_path), monkeypatch)
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
     assert not mgr.cancel("nonexistent")
 
 
-def test_submit_isolation():
+def test_submit_isolation(tmp_path, monkeypatch):
     """Verify job runs inside sandbox, can't access host filesystem."""
-    cfg = _config()
+    cfg = _config(str(tmp_path), monkeypatch)
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
 

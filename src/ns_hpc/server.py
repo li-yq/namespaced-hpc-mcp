@@ -5,6 +5,7 @@ import json
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import AsyncIterator
 
 from mcp.server.fastmcp import FastMCP
@@ -12,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from ns_hpc.config import Config, load_config
 from ns_hpc.instance import Instance
-from ns_hpc.job_manager import JobManager, JobStatus
+from ns_hpc.job_manager import JobManager, JobStatus, _tail_file
 
 
 @dataclass
@@ -177,8 +178,6 @@ async def submit_job(input: SubmitJobInput) -> str:
     if result.status == JobStatus.RUNNING and not input.detach:
         mgr.cancel(result.job_id)
         # Re-read tail after kill
-        from ns_hpc.job_manager import _tail_file
-        from pathlib import Path
         result.stdout_tail = _tail_file(Path(result.stdout_path), input.tail)
         result.stderr_tail = _tail_file(Path(result.stderr_path), input.tail)
         result.status = JobStatus.TIMEOUT
@@ -228,8 +227,6 @@ async def poll_job(input: PollJobInput) -> str:
 
     if result.status == JobStatus.RUNNING and not input.detach:
         mgr.cancel(result.job_id)
-        from ns_hpc.job_manager import _tail_file
-        from pathlib import Path
         result.stdout_tail = _tail_file(Path(result.stdout_path), input.tail)
         result.stderr_tail = _tail_file(Path(result.stderr_path), input.tail)
         result.status = JobStatus.TIMEOUT

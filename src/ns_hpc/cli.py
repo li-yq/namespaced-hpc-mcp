@@ -1,13 +1,14 @@
 import json
 import os
 import sys
+from pathlib import Path
 
 import typer
 
 from ns_hpc.cli_impl import clean_instances, run_doctor
 from ns_hpc.config import load_config
 from ns_hpc.instance import Instance
-from ns_hpc.job_manager import JobManager, JobStatus
+from ns_hpc.job_manager import JobManager, JobStatus, _tail_file
 from ns_hpc.namespace import build_bwrap_args
 
 app = typer.Typer()
@@ -159,8 +160,6 @@ def run(
     # Handle detach
     if result.status == "running" and not detach:
         mgr.cancel(result.job_id)
-        from ns_hpc.job_manager import _tail_file
-        from pathlib import Path
         result.stdout_tail = _tail_file(Path(result.stdout_path), tail)
         result.stderr_tail = _tail_file(Path(result.stderr_path), tail)
         result.status = JobStatus.TIMEOUT
@@ -204,8 +203,6 @@ def status(
 
     if result.status == "running" and not detach and timeout > 0:
         mgr.cancel(job_id)
-        from ns_hpc.job_manager import _tail_file
-        from pathlib import Path
         result.stdout_tail = _tail_file(Path(result.stdout_path), tail)
         result.stderr_tail = _tail_file(Path(result.stderr_path), tail)
         result.status = JobStatus.TIMEOUT

@@ -170,7 +170,7 @@ class JobManager:
                 continue
 
             if has_status_fd and "status_path" in entry:
-                finished, exit_code = self._read_status_file(Path(entry["status_path"]))
+                finished, exit_code, _ = self._read_status_file(Path(entry["status_path"]))
                 if finished:
                     entry["status"] = "completed" if exit_code == 0 else "failed"
                     entry["exit_code"] = exit_code
@@ -196,29 +196,38 @@ class JobManager:
     # ── Status file helpers ─────────────────────────────────────────────────
 
     @staticmethod
-    def _read_status_file(path: Path) -> tuple[bool, int | None]:
+    def _read_status_file(path: Path) -> tuple[bool, int | None, int | None]:
         """Read a ``bwrap --json-status-fd`` output file.
 
-        Returns ``(finished, exit_code)``.  ``finished`` is True when the
-        final ``exit-code`` line has been written (job completed).
+        Iterates all lines and extracts known fields so the parser is
+        forward-compatible with additional JSON lines bwrap may add.
+
+        Returns ``(finished, exit_code, child_pid)``.
+        ``finished`` is True when an ``exit-code`` line has been written.
         """
         try:
             content = path.read_text()
         except (OSError, FileNotFoundError):
-            return False, None
+            return False, None, None
 
-        lines = [l for l in content.strip().splitlines() if l.strip()]
-        if not lines:
-            return False, None
+        child_pid: int | None = None
+        exit_code: int | None = None
 
-        try:
-            last = json.loads(lines[-1])
-        except json.JSONDecodeError:
-            return False, None
+        for line in content.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # skip unknown lines
 
-        if "exit-code" in last:
-            return True, last["exit-code"]
-        return False, None
+            if "exit-code" in obj:
+                exit_code = obj["exit-code"]
+            if "child-pid" in obj:
+                child_pid = obj["child-pid"]
+
+        return exit_code is not None, exit_code, child_pid
 
     @staticmethod
     def _duration_since_created(entry: dict) -> float:
@@ -329,7 +338,7 @@ class JobManager:
 
         # Process finished — prefer status file exit code, fall back to proc
         if status_path is not None:
-            _, exit_code = self._read_status_file(status_path)
+            _, exit_code, _ = self._read_status_file(status_path)
             if exit_code is None:
                 exit_code = proc.returncode
         else:
@@ -451,7 +460,7 @@ class JobManager:
         # If status file is available, use it as source of truth
         if has_status_file:
             status_path = Path(entry["status_path"])
-            finished, exit_code = self._read_status_file(status_path)
+            finished, exit_code, _ = self._read_status_file(status_path)
 
             if finished:
                 self._procs.pop(job_id, None)
@@ -643,7 +652,7 @@ class JobManager:
             proc = self._procs.get(job_id)
 
             if status == "running" and has_status_fd and "status_path" in entry:
-                finished, exit_code = self._read_status_file(Path(entry["status_path"]))
+                finished, exit_code, _ = self._read_status_file(Path(entry["status_path"]))
                 if finished:
                     status = "completed" if exit_code == 0 else "failed"
                     entry["status"] = status

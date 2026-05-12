@@ -87,7 +87,7 @@ flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--
 [proxied_mcps]
 
 [resource_defaults]
-context_dirs = ["context"]
+context_dirs = ["/home/testuser/.local/ns-hpc/context"]
 resource_patterns = ["*.md"]
 
 [slurm]

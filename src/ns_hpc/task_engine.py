@@ -200,7 +200,7 @@ class SlurmTaskEngine:
 #SBATCH --job-name=ns-hpc-{uuid.uuid4().hex[:8]}
 #SBATCH --output={self.instance.workspace_dir / 'slurm_%j.out'}
 #SBATCH --error={self.instance.workspace_dir / 'slurm_%j.err'}
-#SBATCH --time={max(1, timeout // 60)}
+#SBATCH --time={max(1, timeout // 60 + 1)}
 #SBATCH --cpus-per-task={cpus}
 #SBATCH --mem={memory_gb}G
 #SBATCH --partition={partition}

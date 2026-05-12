@@ -260,23 +260,6 @@ def cancel(
     else:
         print(f"Job '{job_id}' not found.")
 
-
-@instance_app.command(name="list")
-def list_cmd():
-    """List all sandbox instances."""
-    cfg = load_config()
-    instances = Instance.list_instances(cfg)
-
-    if not instances:
-        print("No instances found.")
-        raise typer.Exit()
-
-    for inst in instances:
-        meta = json.loads(inst.metadata_path.read_text())
-        created = meta.get("created_at", "unknown")
-        print(f"{inst.id:20s}  created: {created}")
-
-
 @instance_app.command()
 def destroy(
     instance_id: str = typer.Argument(help="Instance ID"),

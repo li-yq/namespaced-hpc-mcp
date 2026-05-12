@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import AsyncIterator
 
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP, Context
 from pydantic import BaseModel, Field
 
 from ns_hpc.config import Config, load_config
@@ -53,10 +53,9 @@ class CreateInstanceInput(BaseModel):
 
 
 @mcp.tool()
-async def create_instance(input: CreateInstanceInput) -> str:
+async def create_instance(input: CreateInstanceInput, ctx: Context) -> str:
     """Create a new sandbox instance with a persistent workspace directory."""
-    ctx = mcp.get_context()
-    context: ServerContext = ctx.request_context.lifespan_context
+    context: ServerContext = ctx.lifespan_context
 
     try:
         instance = Instance.create(input.instance_id, context.config)
@@ -74,10 +73,9 @@ class ListInstancesInput(BaseModel):
 
 
 @mcp.tool()
-async def list_instances(input: ListInstancesInput) -> str:
+async def list_instances(input: ListInstancesInput, ctx: Context) -> str:
     """List all existing sandbox instances."""
-    ctx = mcp.get_context()
-    context: ServerContext = ctx.request_context.lifespan_context
+    context: ServerContext = ctx.lifespan_context
 
     instances = Instance.list_instances(context.config)
     if not instances:
@@ -104,10 +102,9 @@ class DestroyInstanceInput(BaseModel):
 
 
 @mcp.tool()
-async def destroy_instance(input: DestroyInstanceInput) -> str:
+async def destroy_instance(input: DestroyInstanceInput, ctx: Context) -> str:
     """Destroy a sandbox instance and remove its workspace directory."""
-    ctx = mcp.get_context()
-    context: ServerContext = ctx.request_context.lifespan_context
+    context: ServerContext = ctx.lifespan_context
 
     if not Instance.load(input.instance_id, context.config):
         return f"Error: Instance '{input.instance_id}' not found"
@@ -145,7 +142,7 @@ class SubmitJobInput(BaseModel):
 
 
 @mcp.tool()
-async def submit_job(input: SubmitJobInput) -> str:
+async def submit_job(input: SubmitJobInput, ctx: Context) -> str:
     """Submit a command as an async job.
 
     The job runs inside a bwrap sandbox.  stdout/stderr are written
@@ -158,8 +155,7 @@ async def submit_job(input: SubmitJobInput) -> str:
     When ``detach=True``: if the job exceeds timeout, it keeps running
     in the background.  Use ``poll_job`` to check on it later.
     """
-    ctx = mcp.get_context()
-    config: Config = ctx.request_context.lifespan_context.config
+    config: Config = ctx.lifespan_context.config
 
     instance = Instance.load(input.instance_id, config)
     if instance is None:
@@ -216,13 +212,12 @@ class PollJobInput(BaseModel):
 
 
 @mcp.tool()
-async def poll_job(input: PollJobInput) -> str:
+async def poll_job(input: PollJobInput, ctx: Context) -> str:
     """Poll a running job.  Optionally wait for completion.
 
     Same timeout/detach semantics as submit_job.
     """
-    ctx = mcp.get_context()
-    config: Config = ctx.request_context.lifespan_context.config
+    config: Config = ctx.lifespan_context.config
 
     instance = Instance.load(input.instance_id, config)
     if instance is None:
@@ -255,10 +250,9 @@ class ListJobsInput(BaseModel):
 
 
 @mcp.tool()
-async def list_jobs(input: ListJobsInput) -> str:
+async def list_jobs(input: ListJobsInput, ctx: Context) -> str:
     """List all tracked jobs for an instance."""
-    ctx = mcp.get_context()
-    config: Config = ctx.request_context.lifespan_context.config
+    config: Config = ctx.lifespan_context.config
 
     instance = Instance.load(input.instance_id, config)
     if instance is None:
@@ -277,10 +271,9 @@ class CancelJobInput(BaseModel):
 
 
 @mcp.tool()
-async def cancel_job(input: CancelJobInput) -> str:
+async def cancel_job(input: CancelJobInput, ctx: Context) -> str:
     """Cancel a running job."""
-    ctx = mcp.get_context()
-    config: Config = ctx.request_context.lifespan_context.config
+    config: Config = ctx.lifespan_context.config
 
     instance = Instance.load(input.instance_id, config)
     if instance is None:

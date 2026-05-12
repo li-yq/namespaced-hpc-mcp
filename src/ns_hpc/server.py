@@ -65,7 +65,7 @@ def get_context_resource(filename: str, ctx: Context) -> str:
     patterns = context.config.resource_defaults.resource_patterns
 
     for raw_dir in context.config.resource_defaults.context_dirs:
-        d = Path(raw_dir)
+        d = Path(raw_dir).expanduser()
         if not d.is_absolute():
             d = Path.cwd() / d
         candidate = d / filename

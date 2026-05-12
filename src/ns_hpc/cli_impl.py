@@ -131,10 +131,11 @@ def run_doctor() -> None:
     except Exception:
         smoke_ok = False
     finally:
-        try:
-            os.close(r_fd)
-        except OSError:
-            pass
+        for fd in (r_fd, w_fd):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
     _check("bwrap smoke test passes", smoke_ok)
     if not smoke_ok:
         all_ok = False

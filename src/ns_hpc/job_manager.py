@@ -366,9 +366,11 @@ class JobManager:
         status_path: Path,
     ) -> None:
         """Submit via sbatch and persist the entry.  Does not wait."""
+        status_fd = self.config.namespace_defaults.status_fd
         bwrap_cmd = (
             f"{sys.executable} -m ns_hpc bwrap {self.instance.id} -- "
             f"/bin/sh -c {shlex.quote(command)}"
+            f" {status_fd}>{shlex.quote(str(status_path))}"
         )
 
         try:
@@ -396,6 +398,7 @@ class JobManager:
             "slurm_job_id": int(result.stdout.strip().split()[-1]),
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
+            "status_path": str(status_path),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         self._save_jobs()
@@ -557,6 +560,10 @@ class JobManager:
             state, ec = self._slurm_job_state(slurm_job_id)
 
             if state in ("COMPLETED",):
+                # Prefer exit code from status file (more precise than sacct)
+                if ec is None and "status_path" in entry:
+                    _, st = self._read_status_file(Path(entry["status_path"]))
+                    ec = st
                 entry["status"] = "completed"
                 entry["exit_code"] = ec if ec is not None else 0
                 entry["finished_at"] = datetime.now(timezone.utc).isoformat()
@@ -573,6 +580,10 @@ class JobManager:
                 )
 
             if state in ("FAILED", "TIMEOUT", "NODE_FAIL", "CANCELLED"):
+                # Prefer exit code from status file (more precise than sacct)
+                if ec is None and "status_path" in entry:
+                    _, st = self._read_status_file(Path(entry["status_path"]))
+                    ec = st
                 entry["status"] = "failed"
                 entry["exit_code"] = ec if ec is not None else -1
                 entry["finished_at"] = datetime.now(timezone.utc).isoformat()

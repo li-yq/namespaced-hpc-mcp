@@ -124,11 +124,11 @@ def test_poll_running_job(tmp_path, monkeypatch):
 
     # Cancel
     assert mgr.cancel(result.job_id)
-    assert mgr.poll(result.job_id, timeout=0) is None
+    assert mgr.poll(result.job_id, timeout=0).status == JobStatus.CANCELLED
 
 
 def test_list_jobs(tmp_path, monkeypatch):
-    """Submit two jobs, list them."""
+    """Submit two jobs, list them (completed entries are retained)."""
     cfg = _config(str(tmp_path), monkeypatch)
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
@@ -140,9 +140,9 @@ def test_list_jobs(tmp_path, monkeypatch):
     assert r2.status == JobStatus.RUNNING
 
     jobs = mgr.list_jobs()
-    assert len(jobs) == 1  # only the running one
-    assert jobs[0]["job_id"] == r2.job_id
-    assert jobs[0]["status"] == "running"
+    assert len(jobs) == 2  # both completed and running are retained
+    assert jobs[1]["job_id"] == r2.job_id
+    assert jobs[1]["status"] == "running"
 
     mgr.cancel(r2.job_id)
 
@@ -157,7 +157,7 @@ def test_cancel_running(tmp_path, monkeypatch):
     assert result.status == JobStatus.RUNNING
 
     assert mgr.cancel(result.job_id)
-    assert mgr.poll(result.job_id, timeout=0) is None
+    assert mgr.poll(result.job_id, timeout=0).status == JobStatus.CANCELLED
 
 
 def test_cancel_nonexistent(tmp_path, monkeypatch):

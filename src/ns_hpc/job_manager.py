@@ -279,17 +279,10 @@ class JobManager:
         timeout: float = 60,
         tail: int = 50,
     ) -> JobResult:
-        """Submit a job and wait up to ``timeout`` seconds.
+        """Submit a job, then poll up to ``timeout`` seconds.
 
-        The command runs inside a bwrap sandbox via ``ns-hpc bwrap`` CLI.
-        ``ns-hpc bwrap`` handles only the sandbox — no redirection.
-
-        The bwrap invocation is wrapped by the outer layer:
-          Local:  sh -c 'ns-hpc bwrap ... ><stdout> 2><stderr>'
-          Slurm:  sbatch --wrap='ns-hpc bwrap ...' --output=<stdout> --error=<stderr>
-
-        Always waits the full ``timeout`` (or until the job finishes).
-        Returns tail lines of whatever output was produced.
+        Creates the job via ``_submit_local`` or ``_submit_slurm``,
+        then delegates to ``poll()`` so the wait logic is shared.
         """
         job_id = self._next_job_id()
         output_dir = self._ensure_output_dir()
@@ -297,15 +290,13 @@ class JobManager:
         stderr_path = output_dir / f"{job_id}.err"
 
         if mode == "local":
-            return self._submit_local(
-                job_id, command, stdout_path, stderr_path, timeout, tail,
-            )
+            self._submit_local(job_id, command, stdout_path, stderr_path)
         elif mode == "slurm":
-            return self._submit_slurm(
-                job_id, command, stdout_path, stderr_path, timeout, tail,
-            )
+            self._submit_slurm(job_id, command, stdout_path, stderr_path)
         else:
             raise ValueError(f"Unknown mode: {mode}")
+
+        return self.poll(job_id, timeout=timeout, tail=tail)
 
     def _submit_local(
         self,
@@ -313,34 +304,23 @@ class JobManager:
         command: str,
         stdout_path: Path,
         stderr_path: Path,
-        timeout: float,
-        tail: int,
-    ) -> JobResult:
+    ) -> None:
+        """Start a local bwrap job and persist its entry.  Does not wait."""
         status_fd = self.config.namespace_defaults.status_fd
+        status_path = (stdout_path.parent / f"{job_id}.status").resolve()
 
-        # Optional disk-based status tracking via bwrap --json-status-fd.
-        # The CLI bwrap command reads status_fd from config and adds
-        # --json-status-fd automatically, so we only need to redirect the fd.
-        status_path: Path | None = None
-        fd_redirect = ""
-        if status_fd is not None:
-            status_path = (stdout_path.parent / f"{job_id}.status").resolve()
-            fd_redirect = f" {status_fd}>{shlex.quote(str(status_path))}"
-
-        # sh -c '<python> -m ns_hpc bwrap <id> -- ... ><out> 2><err> [<n>><status>]'
+        # sh -c '<python> -m ns_hpc bwrap <id> -- ... ><out> 2><err> <n>><status>'
         shell_cmd = (
             f"{sys.executable} -m ns_hpc bwrap {self.instance.id}"
             f" -- "
             f"/bin/sh -c {shlex.quote(command)}"
             f" >{shlex.quote(str(stdout_path))} 2>{shlex.quote(str(stderr_path))}"
-            f"{fd_redirect}"
+            f" {status_fd}>{shlex.quote(str(status_path))}"
         )
 
         proc = subprocess.Popen(["sh", "-c", shell_cmd])
 
-        # Persist job metadata
-        now = datetime.now(timezone.utc).isoformat()
-        entry: dict = {
+        self._jobs[job_id] = {
             "command": command,
             "mode": "local",
             "status": "running",
@@ -348,50 +328,11 @@ class JobManager:
             "slurm_job_id": None,
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
-            "created_at": now,
+            "status_path": str(status_path),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        if status_path is not None:
-            entry["status_path"] = str(status_path)
-        self._jobs[job_id] = entry
         self._procs[job_id] = proc
         self._save_jobs()
-
-        # Wait up to timeout — output is written to files by shell redirect
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            return JobResult(
-                job_id=job_id,
-                status=JobStatus.RUNNING,
-                stdout_tail=_tail_file(stdout_path, tail),
-                stderr_tail=_tail_file(stderr_path, tail),
-                stdout_path=str(stdout_path),
-                stderr_path=str(stderr_path),
-                duration=self._duration_since_created(entry),
-            )
-
-        # Process finished — prefer status file exit code, fall back to proc
-        if status_path is not None:
-            _, exit_code, _ = self._read_status_file(status_path)
-            if exit_code is None:
-                exit_code = proc.returncode
-        else:
-            exit_code = proc.returncode
-
-        self._procs.pop(job_id, None)
-        self._jobs.pop(job_id, None)
-        self._save_jobs()
-        status = JobStatus.COMPLETED if exit_code == 0 else JobStatus.FAILED
-        return JobResult(
-            job_id=job_id,
-            status=status,
-            exit_code=exit_code,
-            stdout_tail=_tail_file(stdout_path, tail),
-            stderr_tail=_tail_file(stderr_path, tail),
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
-            duration=self._duration_since_created(entry),
-        )
 
     def _submit_slurm(
         self,
@@ -399,9 +340,8 @@ class JobManager:
         command: str,
         stdout_path: Path,
         stderr_path: Path,
-        timeout: float,
-        tail: int,
-    ) -> JobResult:
+    ) -> None:
+        """Submit via sbatch and persist the entry.  Does not wait."""
         bwrap_cmd = (
             f"{sys.executable} -m ns_hpc bwrap {self.instance.id} -- "
             f"/bin/sh -c {shlex.quote(command)}"
@@ -414,7 +354,6 @@ class JobManager:
                 "--output", str(stdout_path),
                 "--error", str(stderr_path),
                 "--job-name", f"ns-hpc-{job_id[:8]}",
-                "--time", str(max(1, int(timeout) // 60 + 1)),
                 "--partition", self.config.slurm.partition,
             ],
             capture_output=True, text=True, timeout=30,
@@ -422,33 +361,17 @@ class JobManager:
         if result.returncode != 0:
             raise RuntimeError(f"sbatch failed: {result.stderr.strip()}")
 
-        slurm_job_id = int(result.stdout.strip().split()[-1])
-
-        now = datetime.now(timezone.utc).isoformat()
         self._jobs[job_id] = {
             "command": command,
             "mode": "slurm",
             "status": "running",
             "pid": None,
-            "slurm_job_id": slurm_job_id,
+            "slurm_job_id": int(result.stdout.strip().split()[-1]),
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
-            "created_at": now,
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
         self._save_jobs()
-
-        # Slurm may not schedule immediately; brief initial wait
-        remaining = timeout - 5
-        if remaining > 0:
-            time.sleep(min(remaining, 5))
-
-        return JobResult(
-            job_id=job_id,
-            status=JobStatus.RUNNING,
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
-            duration=self._duration_since_created(self._jobs[job_id]),
-        )
 
     # ── Poll ─────────────────────────────────────────────────────────────
 
@@ -459,18 +382,36 @@ class JobManager:
         timeout: float = 0,
         tail: int = 50,
     ) -> Optional[JobResult]:
-        """Poll a running job.  Waits up to ``timeout`` seconds.
+        """Poll a job.  Waits up to ``timeout`` seconds for completion.
 
-        Returns ``None`` if the job_id is unknown.
+        Returns the cached result for already-finished jobs.
+        Returns ``None`` only when the ``job_id`` is unknown.
         """
         entry = self._jobs.get(job_id)
         if entry is None:
             return None
 
+        status = entry.get("status")
+        if status in ("completed", "failed", "cancelled", "timeout", "unknown"):
+            return self._result_from_entry(job_id, entry, tail)
+
         if entry["mode"] == "local":
             return self._poll_local(job_id, entry, timeout, tail)
-        else:
-            return self._poll_slurm(job_id, entry, timeout, tail)
+        return self._poll_slurm(job_id, entry, timeout, tail)
+
+    def _result_from_entry(self, job_id: str, entry: dict, tail: int) -> JobResult:
+        """Build a JobResult from a persisted entry (already finished)."""
+        status = JobStatus(entry.get("status", "unknown"))
+        return JobResult(
+            job_id=job_id,
+            status=status,
+            exit_code=entry.get("exit_code"),
+            stdout_tail=_tail_file(Path(entry["stdout_path"]), tail),
+            stderr_tail=_tail_file(Path(entry["stderr_path"]), tail),
+            stdout_path=entry.get("stdout_path", ""),
+            stderr_path=entry.get("stderr_path", ""),
+            duration=self._duration_since_created(entry),
+        )
 
     def _poll_local(
         self,
@@ -481,8 +422,6 @@ class JobManager:
     ) -> JobResult:
         proc = self._procs.get(job_id)
         stdout_path: Path = Path(entry["stdout_path"])
-        stderr_path: Path = Path(entry["stderr_path"])
-        has_status_file = "status_path" in entry
 
         # Wait up to timeout if we have a process handle
         if timeout > 0 and proc is not None and proc.poll() is None:
@@ -491,74 +430,38 @@ class JobManager:
             except subprocess.TimeoutExpired:
                 pass
 
-        # If status file is available, use it as source of truth
-        if has_status_file:
-            status_path = Path(entry["status_path"])
-            finished, exit_code, _ = self._read_status_file(status_path)
+        # Read the status file — bwrap writes exit-code when done
+        status_path = Path(entry["status_path"])
+        finished, exit_code, _ = self._read_status_file(status_path)
 
-            if finished:
-                self._procs.pop(job_id, None)
-                self._jobs.pop(job_id, None)
-                self._save_jobs()
-                return JobResult(
-                    job_id=job_id,
-                    status=JobStatus.COMPLETED if exit_code == 0 else JobStatus.FAILED,
-                    exit_code=exit_code,
-                    stdout_tail=_tail_file(stdout_path, tail),
-                    stderr_tail=_tail_file(stderr_path, tail),
-                    stdout_path=str(stdout_path),
-                    stderr_path=str(stderr_path),
-                    duration=self._duration_since_created(entry),
-                )
+        if not finished and proc and proc.poll() is not None:
+            # Process gone but status file didn't flush — use proc returncode
+            exit_code = proc.returncode
+            finished = True
 
+        if finished:
+            self._procs.pop(job_id, None)
+            entry["status"] = "completed" if exit_code == 0 else "failed"
+            entry["exit_code"] = exit_code
+            self._save_jobs()
             return JobResult(
                 job_id=job_id,
-                status=JobStatus.RUNNING,
+                status=JobStatus.COMPLETED if exit_code == 0 else JobStatus.FAILED,
+                exit_code=exit_code,
                 stdout_tail=_tail_file(stdout_path, tail),
-                stderr_tail=_tail_file(stderr_path, tail),
+                stderr_tail=_tail_file(Path(entry["stderr_path"]), tail),
                 stdout_path=str(stdout_path),
-                stderr_path=str(stderr_path),
+                stderr_path=entry.get("stderr_path", ""),
                 duration=self._duration_since_created(entry),
             )
 
-        # Legacy path (no status file) — rely on proc handle
-        if proc is None:
-            status = JobStatus(entry.get("status", "unknown"))
-            return JobResult(
-                job_id=job_id,
-                status=status,
-                exit_code=entry.get("exit_code"),
-                stdout_tail=_tail_file(stdout_path, tail),
-                stderr_tail=_tail_file(stderr_path, tail),
-                stdout_path=str(stdout_path),
-                stderr_path=str(stderr_path),
-                duration=self._duration_since_created(entry),
-            )
-
-        if proc.poll() is None:
-            return JobResult(
-                job_id=job_id,
-                status=JobStatus.RUNNING,
-                stdout_tail=_tail_file(stdout_path, tail),
-                stderr_tail=_tail_file(stderr_path, tail),
-                stdout_path=str(stdout_path),
-                stderr_path=str(stderr_path),
-                duration=self._duration_since_created(entry),
-            )
-
-        # Process finished — capture exit code
-        exit_code = proc.returncode
-        self._procs.pop(job_id, None)
-        self._jobs.pop(job_id, None)
-        self._save_jobs()
         return JobResult(
             job_id=job_id,
-            status=JobStatus.COMPLETED if exit_code == 0 else JobStatus.FAILED,
-            exit_code=exit_code,
+            status=JobStatus.RUNNING,
             stdout_tail=_tail_file(stdout_path, tail),
-            stderr_tail=_tail_file(stderr_path, tail),
+            stderr_tail=_tail_file(Path(entry["stderr_path"]), tail),
             stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
+            stderr_path=entry.get("stderr_path", ""),
             duration=self._duration_since_created(entry),
         )
 
@@ -598,43 +501,57 @@ class JobManager:
     ) -> JobResult:
         slurm_job_id = entry.get("slurm_job_id")
         stdout_path: Path = Path(entry["stdout_path"])
-        stderr_path: Path = Path(entry["stderr_path"])
 
         if slurm_job_id is None:
             return JobResult(
                 job_id=job_id, status=JobStatus.UNKNOWN,
-                stdout_path=str(stdout_path), stderr_path=str(stderr_path),
+                stdout_path=str(stdout_path),
+                stderr_path=entry.get("stderr_path", ""),
             )
 
-        state, ec = self._slurm_job_state(slurm_job_id)
+        deadline = time.monotonic() + timeout if timeout > 0 else None
 
-        if state in ("COMPLETED",):
-            self._jobs.pop(job_id, None)
-            self._save_jobs()
-            return JobResult(
-                job_id=job_id, status=JobStatus.COMPLETED,
-                exit_code=ec if ec is not None else 0,
-                stdout_tail=_tail_file(stdout_path, tail),
-                stderr_tail=_tail_file(stderr_path, tail),
-                stdout_path=str(stdout_path), stderr_path=str(stderr_path),
-                duration=self._duration_since_created(entry),
-            )
-        elif state in ("FAILED", "TIMEOUT", "NODE_FAIL", "CANCELLED"):
-            self._jobs.pop(job_id, None)
-            self._save_jobs()
-            return JobResult(
-                job_id=job_id, status=JobStatus.FAILED,
-                exit_code=ec if ec is not None else -1,
-                stdout_path=str(stdout_path), stderr_path=str(stderr_path),
-                duration=self._duration_since_created(entry),
-            )
+        while True:
+            state, ec = self._slurm_job_state(slurm_job_id)
 
-        entry["status"] = "unknown"
-        self._save_jobs()
-        return JobResult(
-            job_id=job_id, status=JobStatus.UNKNOWN,
-            stdout_path=str(stdout_path), stderr_path=str(stderr_path),
-        )
+            if state in ("COMPLETED",):
+                entry["status"] = "completed"
+                entry["exit_code"] = ec if ec is not None else 0
+                self._save_jobs()
+                return JobResult(
+                    job_id=job_id, status=JobStatus.COMPLETED,
+                    exit_code=ec if ec is not None else 0,
+                    stdout_tail=_tail_file(stdout_path, tail),
+                    stderr_tail=_tail_file(Path(entry["stderr_path"]), tail),
+                    stdout_path=str(stdout_path),
+                    stderr_path=entry.get("stderr_path", ""),
+                    duration=self._duration_since_created(entry),
+                )
+
+            if state in ("FAILED", "TIMEOUT", "NODE_FAIL", "CANCELLED"):
+                entry["status"] = "failed"
+                entry["exit_code"] = ec if ec is not None else -1
+                self._save_jobs()
+                return JobResult(
+                    job_id=job_id, status=JobStatus.FAILED,
+                    exit_code=ec if ec is not None else -1,
+                    stdout_tail=_tail_file(stdout_path, tail),
+                    stderr_tail=_tail_file(Path(entry["stderr_path"]), tail),
+                    stdout_path=str(stdout_path),
+                    stderr_path=entry.get("stderr_path", ""),
+                    duration=self._duration_since_created(entry),
+                )
+
+            if deadline and time.monotonic() >= deadline:
+                entry["status"] = "unknown"
+                self._save_jobs()
+                return JobResult(
+                    job_id=job_id, status=JobStatus.UNKNOWN,
+                    stdout_path=str(stdout_path),
+                    stderr_path=entry.get("stderr_path", ""),
+                )
+
+            time.sleep(2)
 
     def cancel(self, job_id: str) -> bool:
         """Cancel a running job.  Returns True if cancelled."""
@@ -656,16 +573,14 @@ class JobManager:
                         os.kill(pid, signal.SIGKILL)
                     except OSError:
                         pass  # process already gone
-            self._jobs.pop(job_id, None)
-            self._save_jobs()
-            return True
         else:
             slurm_job_id = entry.get("slurm_job_id")
             if slurm_job_id:
                 subprocess.run(["scancel", str(slurm_job_id)], timeout=15)
-            self._jobs.pop(job_id, None)
-            self._save_jobs()
-            return True
+
+        entry["status"] = "cancelled"
+        self._save_jobs()
+        return True
 
     def cancel_and_tail(self, result: JobResult, tail: int = 50) -> JobResult:
         """Cancel a running job and set status to TIMEOUT with output tail."""
@@ -673,30 +588,29 @@ class JobManager:
         result.stdout_tail = _tail_file(Path(result.stdout_path), tail)
         result.stderr_tail = _tail_file(Path(result.stderr_path), tail)
         result.status = JobStatus.TIMEOUT
+        # Override the "cancelled" status set by cancel() to "timeout"
+        entry = self._jobs.get(result.job_id)
+        if entry is not None:
+            entry["status"] = "timeout"
+            self._save_jobs()
         return result
 
     def list_jobs(self) -> list[dict]:
         """List all tracked jobs from disk-persisted state."""
         result = []
-        has_status_fd = self.config.namespace_defaults.status_fd is not None
         changed = False
 
         for job_id, entry in self._jobs.items():
             status = entry.get("status", "unknown")
-            proc = self._procs.get(job_id)
 
-            if status == "running" and has_status_fd and "status_path" in entry:
+            # Auto-detect completed jobs via status file
+            if status == "running" and "status_path" in entry:
                 finished, exit_code, _ = self._read_status_file(Path(entry["status_path"]))
                 if finished:
                     status = "completed" if exit_code == 0 else "failed"
                     entry["status"] = status
                     entry["exit_code"] = exit_code
                     changed = True
-            elif proc and proc.poll() is not None:
-                ec = proc.returncode
-                status = "completed" if ec == 0 else "failed"
-                entry["status"] = status
-                changed = True
 
             result.append({
                 "job_id": job_id,

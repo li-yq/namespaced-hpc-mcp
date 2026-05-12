@@ -51,21 +51,26 @@ podman exec slurm-slurmctld chown -R 2000:2000 /home/testuser
 # ── 4. Bootstrap ns-hpc environment ──────────────────────────────────────
 # Create venv and install ns-hpc in editable mode (source is read-only
 # mounted, but the venv on the shared volume is writable).
+UV="/usr/local/bin/uv"
+
 echo "=== Installing ns-hpc ==="
+# uv venv creates parent directories automatically
 podman exec --user testuser -w /home/testuser slurm-slurmctld \
-    python3 -m venv --clear "$VENV"
+    "$UV" venv "$VENV"
 
 podman exec --user testuser -w /home/testuser slurm-slurmctld \
-    "$VENV/bin/pip" install -e /ns-hpc-mcp --quiet
+    sh -c "VIRTUAL_ENV=$VENV $UV pip install -e /ns-hpc-mcp --quiet"
 
 podman exec --user testuser -w /home/testuser slurm-slurmctld \
-    "$VENV/bin/pip" install pytest pytest-asyncio --quiet
+    sh -c "VIRTUAL_ENV=$VENV $UV pip install pytest pytest-asyncio --quiet"
 
 # ── 5. Create config.toml ─────────────────────────────────────────────────
 echo "=== Creating config ==="
 podman exec --user testuser -w /home/testuser slurm-slurmctld \
-    sh <<EOF >/dev/null
-cat > "$CONFIG" <<CONFIG_EOF
+    mkdir -p "$HPC_HOME" "$HPC_HOME/context"
+# Write config via host temp file (avoids quoting/escaping issues)
+TMP_CONFIG="$(mktemp)"
+cat > "$TMP_CONFIG" <<'TOML'
 [namespace_defaults]
 bind_ro = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]
 workspace_mount = "/workspace"
@@ -88,11 +93,10 @@ local_timeout = 300
 slurm_timeout = 86400
 
 instances_dir = "/home/testuser/mcp_instances"
-CONFIG_EOF
-EOF
-
-podman exec --user testuser -w /home/testuser slurm-slurmctld \
-    mkdir -p "$HPC_HOME/context"
+TOML
+podman cp "$TMP_CONFIG" slurm-slurmctld:"$CONFIG"
+podman exec slurm-slurmctld chown 2000:2000 "$CONFIG"
+rm "$TMP_CONFIG"
 
 # ── 6. Create activation script ──────────────────────────────────────────
 podman exec --user testuser -w /home/testuser slurm-slurmctld \

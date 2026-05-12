@@ -10,7 +10,8 @@ ADD https://astral.sh/uv/install.sh /tmp/install-uv.sh
 RUN set -ex \
     && bash /tmp/install-uv.sh \
     && rm /tmp/install-uv.sh \
-    && ln -sf /root/.local/bin/uv /usr/local/bin/uv \
+    && cp /root/.local/bin/uv /usr/local/bin/uv \
+    && rm -rf /root/.local/bin/uv \
     && uv --version
 
 # Create unprivileged test user for non-root integration tests

@@ -9,18 +9,18 @@
 # Usage:
 #   cd slurm && bash setup.sh
 #
-# After setup, inspect the MCP server:
+# After setup, ns-hpc is available on PATH everywhere.  Inspect the server:
 #   npx @modelcontextprotocol/inspector \
 #     podman exec --user testuser -w /home/testuser -i slurm-slurmctld \
 #     ns-hpc run
 
 set -euo pipefail
-
 cd "$(dirname "$0")"  # slurm/
 
 HPC_HOME="${HPC_HOME:-/home/testuser/.local/ns-hpc}"
 VENV="$HPC_HOME/venv"
 CONFIG="$HPC_HOME/config.toml"
+NS_HPC_BIN="/usr/local/bin/ns-hpc"
 
 # ── 1. Tear down ──────────────────────────────────────────────────────────
 echo "=== Tearing down old cluster ==="
@@ -63,6 +63,10 @@ podman exec --user testuser -w /home/testuser slurm-slurmctld \
 
 podman exec --user testuser -w /home/testuser slurm-slurmctld \
     sh -c "VIRTUAL_ENV=$VENV $UV pip install pytest pytest-asyncio --quiet"
+
+# Make ns-hpc available on PATH via system-wide symlink
+podman exec slurm-slurmctld ln -sf "$VENV/bin/ns-hpc" "$NS_HPC_BIN"
+podman exec slurm-cpu-worker ln -sf "$VENV/bin/ns-hpc" "$NS_HPC_BIN"
 
 # ── 5. Create config.toml ─────────────────────────────────────────────────
 echo "=== Creating config ==="
@@ -109,7 +113,7 @@ SCRIPT"
 # ── 7. Verify ─────────────────────────────────────────────────────────────
 echo "=== Verifying ==="
 podman exec --user testuser -w /home/testuser slurm-slurmctld \
-    sh -c "PATH=$VENV/bin:\$PATH ns-hpc doctor 2>&1 | head -10" || true
+    ns-hpc doctor 2>&1 | head -10 || true
 
 echo ""
 echo "=== ns-hpc Slurm cluster ready ==="
@@ -120,5 +124,4 @@ echo ""
 echo "Activate:   source $HPC_HOME/activate.sh"
 echo ""
 echo "Inspect:    npx @modelcontextprotocol/inspector \\"
-echo "              podman exec --user testuser -w /home/testuser -i slurm-slurmctld \\"
-echo "              ns-hpc run"
+echo "              podman exec --user testuser -w /home/testuser -i slurm-slurmctld $NS_HPC_BIN run"

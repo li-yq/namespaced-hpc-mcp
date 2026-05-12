@@ -293,9 +293,6 @@ class JobManager:
             f"{fd_redirect}"
         )
 
-        stdout_path.touch()
-        stderr_path.touch()
-
         proc = subprocess.Popen(["sh", "-c", shell_cmd])
 
         # Persist job metadata

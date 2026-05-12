@@ -62,6 +62,10 @@ class CreateInstanceInput(BaseModel):
         ...,
         description="Unique identifier for the new instance",
     )
+    description: str = Field(
+        "",
+        description="Optional human-readable description for the instance",
+    )
 
 
 @mcp.tool()
@@ -70,14 +74,11 @@ async def create_instance(input: CreateInstanceInput, ctx: Context) -> str:
     context: ServerContext = ctx.lifespan_context
 
     try:
-        instance = Instance.create(input.instance_id, context.config)
+        instance = Instance.create(input.instance_id, context.config, input.description)
     except FileExistsError:
         raise ToolError(f"Instance '{input.instance_id}' already exists")
 
-    return (
-        f"Instance '{input.instance_id}' created.\n"
-        f"Workspace: {instance.workspace_dir}"
-    )
+    return f"Instance '{input.instance_id}' created."
 
 
 class ListInstancesInput(BaseModel):
@@ -98,9 +99,13 @@ async def list_instances(input: ListInstancesInput, ctx: Context) -> str:
         try:
             meta = json.loads(inst.metadata_path.read_text())
             created = meta.get("created_at", "unknown")[:19]
+            desc = meta.get("description", "")
+            label = f"{inst.id:20s}  created: {created}"
+            if desc:
+                label += f"  [{desc[:50]}]"
+            lines.append(label)
         except Exception:
-            created = "unknown"
-        lines.append(f"{inst.id:20s}  created: {created}")
+            lines.append(f"{inst.id:20s}  created: unknown")
 
     return "\n".join(lines)
 

@@ -33,7 +33,7 @@ class Instance:
     # ── Lifecycle ────────────────────────────────────────────────────────
 
     @staticmethod
-    def create(instance_id: str, config: Config) -> Instance:
+    def create(instance_id: str, config: Config, description: str = "") -> Instance:
         """Create a new instance directory structure.
 
         Raises FileExistsError if the instance already exists.
@@ -41,6 +41,7 @@ class Instance:
         Args:
             instance_id: Unique instance identifier.
             config: Loaded ns-hpc configuration.
+            description: Optional human-readable description.
 
         Returns:
             New Instance object.
@@ -61,6 +62,8 @@ class Instance:
             "workspace": str(base_dir / "workspace"),
             "hostname": __import__("socket").gethostname(),
         }
+        if description:
+            metadata["description"] = description
         (base_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
 
         return Instance(instance_id, base_dir)

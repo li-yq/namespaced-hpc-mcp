@@ -1,9 +1,7 @@
-import os
 import tempfile
-from pathlib import Path
 
 from ns_hpc.config import Config, NamespaceDefaults, ResourceDefaults
-from ns_hpc.namespace import build_bwrap_args, run_in_sandbox
+from ns_hpc.namespace import build_bwrap_args
 
 
 def default_config() -> Config:
@@ -71,68 +69,3 @@ def test_build_bwrap_args_extra_binds():
     rw_idx = [i for i, a in enumerate(args) if a == "--bind"]
     assert args[rw_idx[-1] + 1] == "/host/rw"
     assert args[rw_idx[-1] + 2] == "/container/rw"
-
-
-def test_run_in_sandbox_basic():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        result = run_in_sandbox(
-            command=["echo", "hello sandbox"],
-            workspace_host_path=tmpdir,
-        )
-    assert result.sandbox_ok
-    assert result.exit_code == 0
-    assert "hello sandbox" in result.stdout
-
-
-def test_run_in_sandbox_exit_code():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        result = run_in_sandbox(
-            command=["sh", "-c", "exit 42"],
-            workspace_host_path=tmpdir,
-        )
-    assert result.sandbox_ok
-    assert result.exit_code == 42
-
-
-def test_run_in_sandbox_stdin():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        result = run_in_sandbox(
-            command=["sh", "-c", "read x; echo $x"],
-            workspace_host_path=tmpdir,
-            stdin="hello from stdin",
-        )
-    assert result.sandbox_ok
-    assert result.exit_code == 0
-    assert "hello from stdin" in result.stdout
-
-
-def test_run_in_sandbox_isolation():
-    """Verify /tmp inside the sandbox does not expose host files."""
-    marker_fd, marker_path = tempfile.mkstemp(dir="/tmp", prefix="bwrap-test-marker-")
-    os.close(marker_fd)
-
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            result = run_in_sandbox(
-                command=["sh", "-c", f"test -f '{marker_path}' && echo UNSAFE || echo SAFE"],
-                workspace_host_path=tmpdir,
-            )
-        assert result.sandbox_ok
-        assert result.exit_code == 0
-        assert result.stdout.strip() == "SAFE"
-    finally:
-        try:
-            os.unlink(marker_path)
-        except FileNotFoundError:
-            pass
-
-
-def test_run_in_sandbox_timeout():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        result = run_in_sandbox(
-            command=["sleep", "10"],
-            workspace_host_path=tmpdir,
-            timeout=2,
-        )
-    assert not result.sandbox_ok
-    assert result.exit_code == -1

@@ -1,10 +1,12 @@
 """MCP server for ns-hpc — sandboxed command execution and instance management."""
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import AsyncIterator
 
 from fastmcp import FastMCP, Context
@@ -20,6 +22,7 @@ from ns_hpc.job_manager import JobManager, JobStatus
 class ServerContext:
     """Lifespan context shared across MCP tools."""
     config: Config
+    config_path: str | None = None
     job_managers: dict[str, JobManager] = field(default_factory=dict)
 
 
@@ -40,7 +43,7 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[ServerContext]:
     config = load_config(config_path)
 
     try:
-        yield ServerContext(config=config)
+        yield ServerContext(config=config, config_path=config_path)
     finally:
         pass
 
@@ -51,6 +54,32 @@ mcp = FastMCP(
     instructions="HPC sandboxing via bubblewrap — manage instances and execute commands in isolated bwrap containers.",
     lifespan=server_lifespan,
 )
+
+
+# ── Context resources ─────────────────────────────────────────────────────
+
+
+@mcp.resource("resource://ns-hpc/context/{filename}")
+def get_context_resource(filename: str, ctx: Context) -> str:
+    """Serve context files (e.g. README.md, python-env.md) from the configured context directories."""
+    context: ServerContext = ctx.lifespan_context
+
+    # Resolve context dirs relative to config file parent
+    config_dir = Path(context.config_path).resolve().parent if context.config_path else Path.cwd()
+    patterns = context.config.resource_defaults.resource_patterns
+
+    for raw_dir in context.config.resource_defaults.context_dirs:
+        d = Path(raw_dir)
+        if not d.is_absolute():
+            d = config_dir / d
+        candidate = d / filename
+        if candidate.exists() and candidate.is_file():
+            # Check that the file matches at least one allowed pattern
+            for pat in patterns:
+                if fnmatch.fnmatch(filename, pat):
+                    return candidate.read_text()
+
+    raise ToolError(f"Context resource '{filename}' not found")
 
 
 # ── Instance management ────────────────────────────────────────────────────

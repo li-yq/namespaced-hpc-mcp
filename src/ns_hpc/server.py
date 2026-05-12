@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import AsyncIterator
 
 from fastmcp import FastMCP, Context
+from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field
 
 from ns_hpc.config import Config, load_config
@@ -71,7 +72,7 @@ async def create_instance(input: CreateInstanceInput, ctx: Context) -> str:
     try:
         instance = Instance.create(input.instance_id, context.config)
     except FileExistsError:
-        return f"Error: Instance '{input.instance_id}' already exists"
+        raise ToolError(f"Instance '{input.instance_id}' already exists")
 
     return (
         f"Instance '{input.instance_id}' created.\n"
@@ -83,7 +84,7 @@ class ListInstancesInput(BaseModel):
     """Input for the list_instances tool."""
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def list_instances(input: ListInstancesInput, ctx: Context) -> str:
     """List all existing sandbox instances."""
     context: ServerContext = ctx.lifespan_context
@@ -112,13 +113,13 @@ class DestroyInstanceInput(BaseModel):
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"destructiveHint": True})
 async def destroy_instance(input: DestroyInstanceInput, ctx: Context) -> str:
     """Destroy a sandbox instance and remove its workspace directory."""
     context: ServerContext = ctx.lifespan_context
 
     if not Instance.load(input.instance_id, context.config):
-        return f"Error: Instance '{input.instance_id}' not found"
+        raise ToolError(f"Instance '{input.instance_id}' not found")
 
     context.job_managers.pop(input.instance_id, None)
     Instance.destroy(input.instance_id, context.config)
@@ -154,7 +155,7 @@ class SubmitJobInput(BaseModel):
 
 
 @mcp.tool()
-async def submit_job(input: SubmitJobInput, ctx: Context) -> str:
+async def submit_job(input: SubmitJobInput, ctx: Context) -> dict:
     """Submit a command as an async job.
 
     The job runs inside a bwrap sandbox.  stdout/stderr are written
@@ -171,7 +172,7 @@ async def submit_job(input: SubmitJobInput, ctx: Context) -> str:
 
     instance = Instance.load(input.instance_id, config)
     if instance is None:
-        return json.dumps({"error": f"Instance '{input.instance_id}' not found"})
+        raise ToolError(f"Instance '{input.instance_id}' not found")
 
     mgr = _get_manager(ctx, instance)
     instance.audit("job.submitted", command=input.command, mode=input.mode,
@@ -199,7 +200,7 @@ async def submit_job(input: SubmitJobInput, ctx: Context) -> str:
                        mode=input.mode,
                        stdout_path=result.stdout_path, stderr_path=result.stderr_path)
 
-    return json.dumps(result.to_dict(), indent=2)
+    return result.to_dict()
 
 
 class PollJobInput(BaseModel):
@@ -224,7 +225,7 @@ class PollJobInput(BaseModel):
 
 
 @mcp.tool()
-async def poll_job(input: PollJobInput, ctx: Context) -> str:
+async def poll_job(input: PollJobInput, ctx: Context) -> dict:
     """Poll a running job.  Optionally wait for completion.
 
     Same timeout/detach semantics as submit_job.
@@ -233,13 +234,13 @@ async def poll_job(input: PollJobInput, ctx: Context) -> str:
 
     instance = Instance.load(input.instance_id, config)
     if instance is None:
-        return json.dumps({"error": f"Instance '{input.instance_id}' not found"})
+        raise ToolError(f"Instance '{input.instance_id}' not found")
 
     mgr = _get_manager(ctx, instance)
     result = mgr.poll(input.job_id, timeout=input.timeout, tail=input.tail)
 
     if result is None:
-        return json.dumps({"error": f"Job '{input.job_id}' not found or already finished"})
+        raise ToolError(f"Job '{input.job_id}' not found or already finished")
 
     if result.status == JobStatus.RUNNING and not input.detach:
         mgr.cancel_and_tail(result, input.tail)
@@ -254,27 +255,24 @@ async def poll_job(input: PollJobInput, ctx: Context) -> str:
                        exit_code=result.exit_code,
                        stdout_path=result.stdout_path, stderr_path=result.stderr_path)
 
-    return json.dumps(result.to_dict(), indent=2)
+    return result.to_dict()
 
 
 class ListJobsInput(BaseModel):
     instance_id: str = Field(..., description="Instance ID")
 
 
-@mcp.tool()
-async def list_jobs(input: ListJobsInput, ctx: Context) -> str:
+@mcp.tool(annotations={"readOnlyHint": True})
+async def list_jobs(input: ListJobsInput, ctx: Context) -> list:
     """List all tracked jobs for an instance."""
     config: Config = ctx.lifespan_context.config
 
     instance = Instance.load(input.instance_id, config)
     if instance is None:
-        return json.dumps({"error": f"Instance '{input.instance_id}' not found"})
+        raise ToolError(f"Instance '{input.instance_id}' not found")
 
     mgr = _get_manager(ctx, instance)
-    jobs = mgr.list_jobs()
-    if not jobs:
-        return json.dumps([])
-    return json.dumps(jobs, indent=2)
+    return mgr.list_jobs()
 
 
 class CancelJobInput(BaseModel):
@@ -283,19 +281,19 @@ class CancelJobInput(BaseModel):
 
 
 @mcp.tool()
-async def cancel_job(input: CancelJobInput, ctx: Context) -> str:
+async def cancel_job(input: CancelJobInput, ctx: Context) -> dict:
     """Cancel a running job."""
     config: Config = ctx.lifespan_context.config
 
     instance = Instance.load(input.instance_id, config)
     if instance is None:
-        return json.dumps({"error": f"Instance '{input.instance_id}' not found"})
+        raise ToolError(f"Instance '{input.instance_id}' not found")
 
     mgr = _get_manager(ctx, instance)
     ok = mgr.cancel(input.job_id)
     if ok:
         instance.audit("job.cancelled", job_id=input.job_id)
-    return json.dumps({"job_id": input.job_id, "cancelled": ok})
+    return {"job_id": input.job_id, "cancelled": ok}
 
 
 # ── Entry point ────────────────────────────────────────────────────────────

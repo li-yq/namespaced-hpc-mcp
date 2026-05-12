@@ -116,6 +116,22 @@ def _tail_file(path: Path, n: int = 50) -> str:
         return ""
 
 
+def _container_path(host_path: str, instance: Instance, config: Config) -> str:
+    """Translate a host-side path to a container-side path inside the bwrap sandbox.
+
+    The workspace directory is bind-mounted at ``workspace_mount`` inside the
+    container.  Output files under ``workspace_dir`` are reachable by replacing
+    the host prefix with the mount point.
+
+    If the path is outside the workspace dir it is returned unchanged.
+    """
+    ws_host = str(instance.workspace_dir)
+    ws_container = config.namespace_defaults.workspace_mount
+    if host_path.startswith(ws_host):
+        return host_path.replace(ws_host, ws_container, 1)
+    return host_path
+
+
 class JobManager:
     """Manages async jobs for an instance.
 
@@ -422,8 +438,8 @@ class JobManager:
             exit_code=entry.get("exit_code"),
             stdout_tail=_tail_file(Path(entry["stdout_path"]), tail),
             stderr_tail=_tail_file(Path(entry["stderr_path"]), tail),
-            stdout_path=entry.get("stdout_path", ""),
-            stderr_path=entry.get("stderr_path", ""),
+            stdout_path=_container_path(entry.get("stdout_path", ""), self.instance, self.config),
+            stderr_path=_container_path(entry.get("stderr_path", ""), self.instance, self.config),
             duration=duration,
         )
 
@@ -473,8 +489,8 @@ class JobManager:
                 exit_code=exit_code,
                 stdout_tail=_tail_file(stdout_path, tail),
                 stderr_tail=_tail_file(stderr_path, tail),
-                stdout_path=str(stdout_path),
-                stderr_path=str(stderr_path),
+                stdout_path=_container_path(str(stdout_path), self.instance, self.config),
+                stderr_path=_container_path(str(stderr_path), self.instance, self.config),
                 duration=entry["duration"],
             )
 
@@ -483,8 +499,8 @@ class JobManager:
             status=JobStatus.RUNNING,
             stdout_tail=_tail_file(stdout_path, tail),
             stderr_tail=_tail_file(stderr_path, tail),
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
+            stdout_path=_container_path(str(stdout_path), self.instance, self.config),
+            stderr_path=_container_path(str(stderr_path), self.instance, self.config),
             duration=self._duration_since_created(entry),
         )
 
@@ -531,8 +547,8 @@ class JobManager:
         if slurm_job_id is None:
             return JobResult(
                 job_id=job_id, status=JobStatus.UNKNOWN,
-                stdout_path=str(stdout_path),
-                stderr_path=str(stderr_path),
+                stdout_path=_container_path(str(stdout_path), self.instance, self.config),
+                stderr_path=_container_path(str(stderr_path), self.instance, self.config),
             )
 
         deadline = time.monotonic() + timeout if timeout > 0 else None
@@ -551,8 +567,8 @@ class JobManager:
                     exit_code=ec if ec is not None else 0,
                     stdout_tail=_tail_file(stdout_path, tail),
                     stderr_tail=_tail_file(stderr_path, tail),
-                    stdout_path=str(stdout_path),
-                    stderr_path=str(stderr_path),
+                    stdout_path=_container_path(str(stdout_path), self.instance, self.config),
+                    stderr_path=_container_path(str(stderr_path), self.instance, self.config),
                     duration=entry["duration"],
                 )
 
@@ -567,8 +583,8 @@ class JobManager:
                     exit_code=ec if ec is not None else -1,
                     stdout_tail=_tail_file(stdout_path, tail),
                     stderr_tail=_tail_file(stderr_path, tail),
-                    stdout_path=str(stdout_path),
-                    stderr_path=str(stderr_path),
+                    stdout_path=_container_path(str(stdout_path), self.instance, self.config),
+                    stderr_path=_container_path(str(stderr_path), self.instance, self.config),
                     duration=entry["duration"],
                 )
 
@@ -576,8 +592,8 @@ class JobManager:
                 # Job still in scheduler — return RUNNING, not UNKNOWN
                 return JobResult(
                     job_id=job_id, status=JobStatus.RUNNING,
-                    stdout_path=str(stdout_path),
-                    stderr_path=str(stderr_path),
+                    stdout_path=_container_path(str(stdout_path), self.instance, self.config),
+                    stderr_path=_container_path(str(stderr_path), self.instance, self.config),
                     duration=self._duration_since_created(entry),
                 )
 

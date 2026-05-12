@@ -77,9 +77,14 @@ def test_submit_and_complete(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "hello_job" in result.stdout_tail
 
-    # Output files exist
-    assert Path(result.stdout_path).exists()
-    assert "hello_job" in Path(result.stdout_path).read_text()
+    # stdout_path is a container-side path — verify format
+    assert result.stdout_path.startswith(cfg.namespace_defaults.workspace_mount)
+    # Also verify the host-side file exists (derive from workspace_dir)
+    host_stdout = result.stdout_path.replace(
+        cfg.namespace_defaults.workspace_mount, str(inst.workspace_dir), 1
+    )
+    assert Path(host_stdout).exists()
+    assert "hello_job" in Path(host_stdout).read_text()
 
 
 def test_submit_exit_code(tmp_path, monkeypatch):
@@ -101,8 +106,12 @@ def test_submit_detach_timeout(tmp_path, monkeypatch):
 
     result = mgr.submit("sleep 30 && echo done", timeout=2, tail=5)
     assert result.status == JobStatus.RUNNING, f"Expected RUNNING, got {result.status}"
-    # Output file should exist (may be empty)
-    assert Path(result.stdout_path).exists()
+    # stdout_path is container-side — derive host path for verification
+    assert result.stdout_path.startswith(cfg.namespace_defaults.workspace_mount)
+    host_stdout = result.stdout_path.replace(
+        cfg.namespace_defaults.workspace_mount, str(inst.workspace_dir), 1
+    )
+    assert Path(host_stdout).exists()
 
     # Clean up — cancel the still-running job
     mgr.cancel(result.job_id)

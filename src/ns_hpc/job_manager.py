@@ -53,6 +53,7 @@ class JobStatus(str, Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     TIMEOUT = "timeout"
+    ABORTED = "aborted"
     UNKNOWN = "unknown"
 
 
@@ -156,12 +157,17 @@ class JobManager:
         """After restart, reconcile local jobs via status files.
 
         When the status file shows ``exit-code`` the job is complete.
-        When it shows ``child-pid`` but no ``exit-code``, check ``/proc``
-        to see if the bwrap process is still alive (guard against PID
-        reuse by verifying ``comm`` and the file descriptor link).
+        When it shows ``child-pid`` but no ``exit-code``:
+
+        * If ``config.job.proc_check`` is enabled (default), verify
+          whether the bwrap process is alive via ``/proc`` (guarding
+          against PID reuse).  If alive the job keeps running.
+        * Otherwise mark the job ``ABORTED`` — the sandbox was killed
+          by ``--die-with-parent`` when the parent process exited.
         """
         changed = False
-        status_fd = self.config.namespace_defaults.status_fd
+        cfg = self.config
+        status_fd = cfg.namespace_defaults.status_fd
 
         for entry in self._jobs.values():
             if entry.get("mode") != "local" or entry.get("status") != "running":
@@ -173,14 +179,14 @@ class JobManager:
                     entry["status"] = "completed" if exit_code == 0 else "failed"
                     entry["exit_code"] = exit_code
                     changed = True
-                elif not self._is_bwrap_alive(
-                    entry.get("pid", -1),
-                    status_fd,
-                    entry["status_path"],
+                elif (
+                    cfg.job.proc_check
+                    and self._is_bwrap_alive(entry.get("pid", -1), status_fd, entry["status_path"])
                 ):
-                    entry["status"] = "unknown"
+                    pass  # still legitimately running
+                else:
+                    entry["status"] = "aborted"
                     changed = True
-                # else: still legitimately running — keep status, no change
             else:
                 entry["status"] = "unknown"
                 changed = True
@@ -392,7 +398,7 @@ class JobManager:
             return None
 
         status = entry.get("status")
-        if status in ("completed", "failed", "cancelled", "timeout", "unknown"):
+        if status in ("completed", "failed", "cancelled", "timeout", "aborted", "unknown"):
             return self._result_from_entry(job_id, entry, tail)
 
         if entry["mode"] == "local":

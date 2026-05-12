@@ -35,12 +35,18 @@ class ResourceLimits(BaseModel):
     slurm_timeout: int = 86400
 
 
+class JobConfig(BaseModel):
+    """Job execution and recovery settings."""
+    proc_check: bool = True
+
+
 class Config(BaseModel):
     namespace_defaults: NamespaceDefaults
     proxied_mcps: dict[str, ProxiedMCP]
     resource_defaults: ResourceDefaults
     slurm: SlurmConfig = SlurmConfig()
     resource_limits: ResourceLimits = ResourceLimits()
+    job: JobConfig = JobConfig()
     instances_dir: str = "${HOME}/mcp_instances"
 
     def resolve_instances_dir(self) -> Path:

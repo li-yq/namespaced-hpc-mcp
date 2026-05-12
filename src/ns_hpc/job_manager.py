@@ -410,6 +410,9 @@ class JobManager:
     def _result_from_entry(self, job_id: str, entry: dict, tail: int) -> JobResult:
         """Build a JobResult from a persisted entry (already finished)."""
         status = JobStatus(entry.get("status", "unknown"))
+        duration = entry.get("duration")
+        if duration is None:
+            duration = self._duration_since_created(entry)
         return JobResult(
             job_id=job_id,
             status=status,
@@ -418,7 +421,7 @@ class JobManager:
             stderr_tail=_tail_file(Path(entry["stderr_path"]), tail),
             stdout_path=entry.get("stdout_path", ""),
             stderr_path=entry.get("stderr_path", ""),
-            duration=self._duration_since_created(entry),
+            duration=duration,
         )
 
     def _poll_local(
@@ -430,6 +433,8 @@ class JobManager:
     ) -> JobResult:
         proc = self._procs.get(job_id)
         stdout_path: Path = Path(entry["stdout_path"])
+        stderr_path: Path = Path(entry["stderr_path"])
+        status_path: Path = Path(entry["status_path"])
 
         # Wait up to timeout if we have a process handle
         if timeout > 0 and proc is not None and proc.poll() is None:
@@ -439,7 +444,6 @@ class JobManager:
                 pass
 
         # Read the status file — bwrap writes exit-code when done
-        status_path = Path(entry["status_path"])
         finished, exit_code, _ = self._read_status_file(status_path)
 
         if not finished and proc and proc.poll() is not None:
@@ -451,25 +455,33 @@ class JobManager:
             self._procs.pop(job_id, None)
             entry["status"] = "completed" if exit_code == 0 else "failed"
             entry["exit_code"] = exit_code
+            entry["finished_at"] = datetime.fromtimestamp(
+                status_path.stat().st_mtime, tz=timezone.utc
+            ).isoformat()
+            created = datetime.fromisoformat(entry["created_at"])
+            duration = (
+                datetime.fromisoformat(entry["finished_at"]) - created
+            ).total_seconds()
+            entry["duration"] = round(duration, 2)
             self._save_jobs()
             return JobResult(
                 job_id=job_id,
                 status=JobStatus.COMPLETED if exit_code == 0 else JobStatus.FAILED,
                 exit_code=exit_code,
                 stdout_tail=_tail_file(stdout_path, tail),
-                stderr_tail=_tail_file(Path(entry["stderr_path"]), tail),
+                stderr_tail=_tail_file(stderr_path, tail),
                 stdout_path=str(stdout_path),
-                stderr_path=entry.get("stderr_path", ""),
-                duration=self._duration_since_created(entry),
+                stderr_path=str(stderr_path),
+                duration=entry["duration"],
             )
 
         return JobResult(
             job_id=job_id,
             status=JobStatus.RUNNING,
             stdout_tail=_tail_file(stdout_path, tail),
-            stderr_tail=_tail_file(Path(entry["stderr_path"]), tail),
+            stderr_tail=_tail_file(stderr_path, tail),
             stdout_path=str(stdout_path),
-            stderr_path=entry.get("stderr_path", ""),
+            stderr_path=str(stderr_path),
             duration=self._duration_since_created(entry),
         )
 
@@ -509,12 +521,13 @@ class JobManager:
     ) -> JobResult:
         slurm_job_id = entry.get("slurm_job_id")
         stdout_path: Path = Path(entry["stdout_path"])
+        stderr_path: Path = Path(entry["stderr_path"])
 
         if slurm_job_id is None:
             return JobResult(
                 job_id=job_id, status=JobStatus.UNKNOWN,
                 stdout_path=str(stdout_path),
-                stderr_path=entry.get("stderr_path", ""),
+                stderr_path=str(stderr_path),
             )
 
         deadline = time.monotonic() + timeout if timeout > 0 else None
@@ -525,38 +538,42 @@ class JobManager:
             if state in ("COMPLETED",):
                 entry["status"] = "completed"
                 entry["exit_code"] = ec if ec is not None else 0
+                entry["finished_at"] = datetime.now(timezone.utc).isoformat()
+                entry["duration"] = round(self._duration_since_created(entry), 2)
                 self._save_jobs()
                 return JobResult(
                     job_id=job_id, status=JobStatus.COMPLETED,
                     exit_code=ec if ec is not None else 0,
                     stdout_tail=_tail_file(stdout_path, tail),
-                    stderr_tail=_tail_file(Path(entry["stderr_path"]), tail),
+                    stderr_tail=_tail_file(stderr_path, tail),
                     stdout_path=str(stdout_path),
-                    stderr_path=entry.get("stderr_path", ""),
-                    duration=self._duration_since_created(entry),
+                    stderr_path=str(stderr_path),
+                    duration=entry["duration"],
                 )
 
             if state in ("FAILED", "TIMEOUT", "NODE_FAIL", "CANCELLED"):
                 entry["status"] = "failed"
                 entry["exit_code"] = ec if ec is not None else -1
+                entry["finished_at"] = datetime.now(timezone.utc).isoformat()
+                entry["duration"] = round(self._duration_since_created(entry), 2)
                 self._save_jobs()
                 return JobResult(
                     job_id=job_id, status=JobStatus.FAILED,
                     exit_code=ec if ec is not None else -1,
                     stdout_tail=_tail_file(stdout_path, tail),
-                    stderr_tail=_tail_file(Path(entry["stderr_path"]), tail),
+                    stderr_tail=_tail_file(stderr_path, tail),
                     stdout_path=str(stdout_path),
-                    stderr_path=entry.get("stderr_path", ""),
-                    duration=self._duration_since_created(entry),
+                    stderr_path=str(stderr_path),
+                    duration=entry["duration"],
                 )
 
             if deadline and time.monotonic() >= deadline:
-                entry["status"] = "unknown"
-                self._save_jobs()
+                # Job still in scheduler — return RUNNING, not UNKNOWN
                 return JobResult(
-                    job_id=job_id, status=JobStatus.UNKNOWN,
+                    job_id=job_id, status=JobStatus.RUNNING,
                     stdout_path=str(stdout_path),
-                    stderr_path=entry.get("stderr_path", ""),
+                    stderr_path=str(stderr_path),
+                    duration=self._duration_since_created(entry),
                 )
 
             time.sleep(2)
@@ -567,12 +584,21 @@ class JobManager:
         if entry is None:
             return False
 
+        # Already in a terminal state — nothing to cancel
+        if entry.get("status") in ("completed", "failed", "cancelled", "timeout", "unknown"):
+            return True
+
         if entry["mode"] == "local":
             proc = self._procs.pop(job_id, None)
             if proc and proc.poll() is None:
-                # bwrap runs as PID 1 and ignores SIGTERM; SIGKILL is required.
-                proc.kill()
-                proc.wait()
+                # Send SIGTERM first so the inner command can clean up.
+                # When the shell dies, --die-with-parent kills bwrap.
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
             elif proc is None and "status_path" in entry:
                 # No proc handle — try killing by outer PID from stored entry
                 pid = entry.get("pid")

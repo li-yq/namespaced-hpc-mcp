@@ -24,7 +24,7 @@ class Instance:
         self.workspace_dir = base_dir / "workspace"
         self.audit_log_path = base_dir / "audit.log"
         self.metadata_path = base_dir / "metadata.json"
-        self.output_dir = base_dir / "output"
+        self.output_dir = base_dir / "output"  # TODO: unused — JobManager writes to workspace/.ns_hpc_output instead
 
     @property
     def exists(self) -> bool:

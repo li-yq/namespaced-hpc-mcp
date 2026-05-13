@@ -172,6 +172,9 @@ class JobManager:
 
     def _save_jobs(self) -> None:
         """Atomically write job metadata to disk."""
+        # TODO: replace single-file write with per-job files to avoid
+        # read-modify-write races under concurrent job completion
+        # and to enable cross-process visibility.
         self._jobs_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._jobs_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self._jobs, indent=2))

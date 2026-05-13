@@ -136,6 +136,23 @@ class JobManager:
         self._jobs_path = instance.base_dir / ".ns_hpc_jobs.json"
         self._jobs = self._load_jobs()
         self._fixup_stale_jobs()
+        # Probe systemd-run for cgroup resource limits
+        self._systemd_available = self._probe_systemd()
+
+    @staticmethod
+    def _probe_systemd() -> bool:
+        """Check if systemd-run --user --scope is available."""
+        systemd = shutil.which("systemd-run")
+        if not systemd:
+            return False
+        try:
+            r = subprocess.run(
+                [systemd, "--user", "--scope", "true"],
+                capture_output=True, timeout=5,
+            )
+            return r.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
 
     # ── Persistence ──────────────────────────────────────────────────────
 
@@ -349,12 +366,11 @@ class JobManager:
         )
 
         # Wrap with systemd-run for cgroup v2 resource limits (best-effort)
-        systemd = shutil.which("systemd-run")
-        if systemd:
+        if self._systemd_available:
             cpus = self.config.resources.cpus.limit
             memory = parse_memory(self.config.resources.memory.limit)
             runner = [
-                systemd, "--user", "--scope",
+                "systemd-run", "--user", "--scope",
                 "-p", f"CPUQuota={cpus * 100}%",
                 "-p", f"MemoryMax={memory}",
                 "--", "sh", "-c",

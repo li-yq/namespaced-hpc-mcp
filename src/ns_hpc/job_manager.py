@@ -75,9 +75,6 @@ class JobResult:
             "exit_code": self.exit_code,
             "stdout_tail": self.stdout_tail,
             "stderr_tail": self.stderr_tail,
-            "stdout_path": self.stdout_path,
-            "stderr_path": self.stderr_path,
-            "duration": round(self.duration, 2),
         }
 
 
@@ -539,7 +536,7 @@ class JobManager:
             if state:
                 return (state, ec)
 
-        return ("UNKNOWN", None)
+        raise RuntimeError(f"slurm job {slurm_job_id} not found in sacct output")
 
     def _poll_slurm(
         self,

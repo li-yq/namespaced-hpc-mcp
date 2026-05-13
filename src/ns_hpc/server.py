@@ -318,7 +318,7 @@ async def poll_job(input: PollJobInput, ctx: Context) -> dict:
         instance.audit("job.running", job_id=result.job_id,
                        detached=input.detach, poll_timeout=input.timeout,
                        stdout_path=result.stdout_path, stderr_path=result.stderr_path)
-    elif result.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.TIMEOUT):
+    elif result.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
         instance.audit(f"job.{result.status.value}", job_id=result.job_id,
                        exit_code=result.exit_code,
                        stdout_path=result.stdout_path, stderr_path=result.stderr_path)

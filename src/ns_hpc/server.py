@@ -22,21 +22,6 @@ from ns_hpc.job_manager import JobManager, JobStatus
 from ns_hpc.proxy import ProxyManager, discover_tools
 
 
-def _probe_systemd() -> bool:
-    """Check if systemd-run --user --scope is available (MCP server context)."""
-    import shutil, subprocess
-    systemd = shutil.which("systemd-run")
-    if not systemd:
-        return False
-    try:
-        r = subprocess.run(
-            [systemd, "--user", "--scope", "true"],
-            capture_output=True, timeout=5,
-        )
-        return r.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-
 
 @dataclass
 class ServerContext:
@@ -44,7 +29,6 @@ class ServerContext:
     config: Config
     config_path: str | None = None
     job_managers: dict[str, JobManager] = field(default_factory=dict)
-    systemd_available: bool = False
     proxy_manager: ProxyManager = field(default_factory=ProxyManager)
 
 
@@ -53,7 +37,7 @@ def _get_manager(ctx: Context, instance: Instance) -> JobManager:
     context: ServerContext = ctx.lifespan_context
     mgr = context.job_managers.get(instance.id)
     if mgr is None:
-        mgr = JobManager(instance, context.config, systemd_available=context.systemd_available)
+        mgr = JobManager(instance, context.config)
         context.job_managers[instance.id] = mgr
     return mgr
 
@@ -147,7 +131,6 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[ServerContext]:
     """Initialize server context and register context resources."""
     config_path = os.environ.get("NS_HPC_CONFIG")
     config = load_config(config_path)
-    systemd_available = _probe_systemd()
 
     _register_context_resources(server, config, config_path)
     proxy_manager = await _register_proxied_tools(server, config)
@@ -155,7 +138,6 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[ServerContext]:
     try:
         yield ServerContext(
             config=config, config_path=config_path,
-            systemd_available=systemd_available,
             proxy_manager=proxy_manager,
         )
     finally:

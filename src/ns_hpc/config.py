@@ -76,6 +76,7 @@ class Resources(BaseModel):
     """Local cgroup resource limits — fixed upper bounds."""
     cpus: CpuLimit = CpuLimit()
     memory: MemoryLimit = MemoryLimit()
+    use_systemd: bool = True
 
 
 class SlurmResource(BaseModel):

@@ -26,6 +26,9 @@ flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--
 [resource_defaults]
 context_dirs = ["config/context"]
 resource_patterns = ["*.md"]
+
+[resources]
+use_systemd = false
 """
 
 

@@ -14,11 +14,11 @@ pip install ns-hpc   # or: uv add ns-hpc
 ns-hpc doctor
 
 # Create an instance and run a command
-ns-hpc exec my-instance -- ls -la
-ns-hpc exec my-instance -- python -c "print('hello from sandbox')"
+ns-hpc bwrap my-instance -- ls -la
+ns-hpc bwrap my-instance -- python -c "print('hello from sandbox')"
 
 # Interactive shell
-ns-hpc enter my-instance
+ns-hpc instance enter my-instance
 
 # Start the MCP server
 ns-hpc run
@@ -95,8 +95,16 @@ See `config.toml` for the full default configuration.
 | Command | Description |
 |---------|-------------|
 | `ns-hpc doctor` | Diagnose system prerequisites |
-| `ns-hpc exec <id> -- <cmd>` | Run command in sandbox |
-| `ns-hpc enter <id>` | Interactive bash in sandbox |
+| `ns-hpc bwrap <id> -- <cmd>` | Run command in bwrap sandbox (raw) |
+| `ns-hpc instance create <id>` | Create a new sandbox instance |
+| `ns-hpc instance run <id> -- <cmd>` | Run command as an async job |
+| `ns-hpc instance status <id> <job-id>` | Check job status |
+| `ns-hpc instance jobs <id>` | List tracked jobs |
+| `ns-hpc instance cancel <id> <job-id>` | Cancel a running job |
+| `ns-hpc instance enter <id>` | Interactive bash in sandbox |
+| `ns-hpc instance describe <id>` | Show instance metadata |
+| `ns-hpc instance update <id> -d <desc>` | Update instance description |
+| `ns-hpc instance destroy <id>` | Remove an instance and its data |
 | `ns-hpc run` | Start MCP server (stdio) |
 | `ns-hpc clean --days 7` | Remove stale instances |
 
@@ -104,12 +112,16 @@ See `config.toml` for the full default configuration.
 
 | Tool | Description |
 |------|-------------|
-| `run_command` | Execute shell command in bwrap sandbox |
-| `read_file` | Read file from workspace (path traversal protected) |
-| `write_file` | Write file to workspace |
-| `list_directory` | List workspace directory contents |
+| `create_instance` | Create a new sandbox instance |
+| `list_instances` | List all instances |
+| `update_instance` | Update instance metadata (description) |
+| `destroy_instance` | Remove an instance and its workspace |
+| `submit_job` | Submit a command as an async job |
+| `poll_job` | Poll a running job (optionally wait for completion) |
+| `list_jobs` | List all tracked jobs for an instance |
+| `cancel_job` | Cancel a running job and return final output |
 
-All tools accept `instance_id` (default: `"default"`) for multi-instance isolation.
+All commands run inside isolated bwrap containers with read-only system paths.
 
 ## Security
 
@@ -135,7 +147,7 @@ uv run pytest
 uv run python -m ns_hpc doctor
 
 # Run a command in sandbox
-uv run python -m ns_hpc exec test-instance -- echo "hello"
+uv run python -m ns_hpc bwrap test-instance -- echo "hello"
 
 # Start MCP server
 uv run python -m ns_hpc run
@@ -145,7 +157,7 @@ uv run python -m ns_hpc run
 
 - Linux with user namespaces enabled
 - bwrap (bubblewrap) 0.11+
-- Python 3.14+
+- Python 3.12+ (developed on 3.14)
 - (Optional) Slurm: sbatch, squeue, sacct
 
 ## License

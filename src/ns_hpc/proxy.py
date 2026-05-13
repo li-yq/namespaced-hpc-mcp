@@ -15,7 +15,7 @@ from typing import Any
 
 from fastmcp.client import Client
 from fastmcp.client.transports import StdioTransport
-from mcp.types import Tool
+from mcp.types import TextContent, Tool
 
 from ns_hpc.config import ProxiedMCP
 
@@ -79,7 +79,7 @@ class ProxiedMCPClient:
         client = await self.ensure_connected()
         return await client.list_tools()
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> list[TextContent]:
         client = await self.ensure_connected()
         return await client.call_tool(name, arguments)
 

@@ -7,7 +7,7 @@ import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from fastmcp import FastMCP, Context
 from fastmcp.exceptions import ToolError
@@ -89,7 +89,7 @@ def _register_context_resources(server: FastMCP, config: Config, config_path: st
 
 def _make_proxy_handler(
     pm: ProxyManager, proxy_name: str, cfg: ProxiedMCP, remote_name: str,
-) -> Any:
+) -> Callable[..., Awaitable[str]]:
     """Create a **kwargs handler that routes to the proxied MCP inside an instance."""
     async def handler(**kwargs: Any) -> str:
         instance_id = kwargs.pop("instance_id")

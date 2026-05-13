@@ -99,7 +99,7 @@ def run_doctor() -> None:
     if not tmp_ok:
         all_ok = False
 
-    # 7. Smoke test bwrap --json-status-fd
+    # 8. Smoke test bwrap --json-status-fd
     r_fd, w_fd = os.pipe()
     try:
         proc = subprocess.Popen(

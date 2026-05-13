@@ -136,7 +136,7 @@ def _load_toml(path: Path) -> dict:
     try:
         raw = path.read_bytes()
         return tomli.loads(raw.decode())
-    except (FileNotFoundError, tomli.TOMLDecodeError, OSError) as e:
+    except FileNotFoundError as e:
         logger.warning("failed to load config %s: %s", path, e)
         return {}
 

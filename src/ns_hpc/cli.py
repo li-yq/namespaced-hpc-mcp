@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import sys
 
 import typer
@@ -83,6 +84,11 @@ def bwrap(
         print(f"Error: instance '{instance_id}' not found.", file=sys.stderr)
         raise typer.Exit(code=1)
 
+    bwrap_path = shutil.which("bwrap")
+    if not bwrap_path:
+        print("Error: 'bwrap' not found on PATH. Is bubblewrap installed?", file=sys.stderr)
+        raise typer.Exit(code=1)
+
     fd = cfg.namespace_defaults.status_fd
     argv = build_bwrap_args(
         command=list(command),
@@ -90,7 +96,7 @@ def bwrap(
         config=cfg,
         extra_bwrap_flags=["--json-status-fd", str(fd)],
     )
-    os.execvp("bwrap", argv)
+    os.execvp(bwrap_path, argv)
 
 
 # ── Instance subcommands ─────────────────────────────────────────────────
@@ -216,7 +222,7 @@ def run(
     )
 
     # Handle detach
-    if result.status == "running" and not detach:
+    if result.status == JobStatus.RUNNING and not detach:
         mgr.cancel_and_tail(result, tail)
 
     # Audit outcome
@@ -235,7 +241,7 @@ def run(
     print(f"stdout: {result.stdout_path}")
     print(f"stderr: {result.stderr_path}")
 
-    if result.status in ("failed",):
+    if result.status == JobStatus.FAILED:
         raise typer.Exit(code=result.exit_code or 1)
 
 
@@ -261,7 +267,7 @@ def status(
         print(f"Job '{job_id}' not found or already finished.")
         raise typer.Exit(code=1)
 
-    if result.status == "running" and not detach and timeout > 0:
+    if result.status == JobStatus.RUNNING and not detach and timeout > 0:
         mgr.cancel_and_tail(result, tail)
 
     # Audit outcome

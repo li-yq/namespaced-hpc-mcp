@@ -129,7 +129,7 @@ class JobManager:
     Job state is persisted to a JSON file for survival across restarts.
     """
 
-    def __init__(self, instance: Instance, config: Config):
+    def __init__(self, instance: Instance, config: Config, systemd_available: bool | None = None):
         self.instance = instance
         self.config = config
         # In-memory subprocess handles for local (running) jobs
@@ -139,7 +139,10 @@ class JobManager:
         self._jobs = self._load_jobs()
         self._fixup_stale_jobs()
         # Probe systemd-run for cgroup resource limits
-        self._systemd_available = self._probe_systemd()
+        if systemd_available is not None:
+            self._systemd_available = systemd_available
+        else:
+            self._systemd_available = self._probe_systemd()
 
     @staticmethod
     def _probe_systemd() -> bool:
@@ -424,6 +427,25 @@ class JobManager:
         for name, spec in self.config.slurm.resources.items():
             value = (slurm_resources or {}).get(name, spec.default)
             if value:
+                # Validate against configured max
+                spec_max = spec.max
+                try:
+                    v_int = int(value) if not isinstance(value, int) else value
+                    m_int = int(spec_max) if not isinstance(spec_max, int) else spec_max
+                    if v_int > m_int:
+                        raise ValueError(
+                            f"Slurm resource '{name}' value {value} exceeds maximum {spec_max}"
+                        )
+                except (ValueError, TypeError):
+                    # Non-integer — try memory comparison
+                    if isinstance(value, str) and isinstance(spec_max, str):
+                        try:
+                            if parse_memory(value) > parse_memory(spec_max):
+                                raise ValueError(
+                                    f"Slurm resource '{name}' value {value} exceeds maximum {spec_max}"
+                                )
+                        except ValueError:
+                            pass
                 sbatch_args.append(spec.parameter.format(value))
 
         try:
@@ -754,17 +776,13 @@ class JobManager:
         self._save_jobs()
         return True
 
-    def cancel_and_tail(self, result: JobResult, tail: int = 50) -> JobResult:
-        """Cancel a running job and set status to TIMEOUT with output tail."""
+    def cancel_and_tail(self, result: JobResult, tail: int = 50) -> None:
+        """Cancel a running job and set status to CANCELLED with output tail."""
         self.cancel(result.job_id)
         result.stdout_tail = _tail_file(Path(result.stdout_path), tail)
         result.stderr_tail = _tail_file(Path(result.stderr_path), tail)
         result.status = JobStatus.CANCELLED
-        entry = self._jobs.get(result.job_id)
-        if entry is not None:
-            entry["status"] = "cancelled"
-            self._save_jobs()
-        return result
+        result.message = "job was cancelled due to timeout"
 
     def list_jobs(self) -> list[dict]:
         """List all tracked jobs from disk-persisted state."""

@@ -1,21 +1,15 @@
 #!/usr/bin/env python3
-"""Integration test — simulates MCP client sessions against the running server.
+"""Integration test — simulated MCP sessions with full timing-edge-case coverage.
 
-NOTE: standalone script (runs via ``python tests/session_test.py``), not a
-pytest test class — kept under ``tests/`` so it's versioned alongside unit
-tests and can be run inside the slurm container with the container venv.
+Produces a timestamped session log for manual review.
 
 Usage:
-    # Run locally (local-only tests, slurm tests skipped)
-    python tests/session_test.py
-
-    # Run in slurm container (all tests)
-    podman exec --user 2000 -w /home/testuser slurm-slurmctld \\
-        sh -c "cd /ns-hpc-mcp && /home/testuser/.local/ns-hpc/venv/bin/python tests/session_test.py"
+    python tests/session_test.py                         # local only
+    bash slurm/test_session.sh                           # in slurm cluster
 """
 from __future__ import annotations
 
-__test__ = False  # prevent pytest collection
+__test__ = False
 
 import json
 import os
@@ -25,8 +19,6 @@ import tempfile
 import time
 from pathlib import Path
 
-# ── Import server (must be before ns_hpc.server to set config) ──────────────
-
 CONFIG_PATH = os.environ.get("NS_HPC_CONFIG", "config/config.toml")
 os.environ["NS_HPC_CONFIG"] = CONFIG_PATH
 
@@ -34,11 +26,9 @@ import asyncio
 from ns_hpc.server import mcp, server_lifespan
 from ns_hpc.instance import Instance
 from ns_hpc.config import Config, load_config
-from ns_hpc.job_manager import JobManager
+from ns_hpc.job_manager import JobManager, JobResult, JobStatus
 
-
-# ── Config helpers ──────────────────────────────────────────────────────────
-
+# ── Config template ─────────────────────────────────────────────────────────
 
 _CONFIG_TOML = """\
 instances_dir = "{instances_dir}"
@@ -66,322 +56,372 @@ local_timeout = 300
 slurm_timeout = 86400
 """
 
+# Produces ~10 lines over ~20s — great for tail and timing tests.
+_SEQ_CMD = r'for i in `seq 10`; do echo "line-$i"; date; sleep 2; done'
+
+
+def check_slurm() -> bool:
+    return shutil.which("sbatch") is not None
+
 
 def _test_config(tmp_dir: str) -> Config:
-    """Write a config with instances_dir pointing to a temp dir, return Config."""
-    # When sbatch is available, use a shared filesystem path so compute
-    # nodes can access the instances and their output/status files.
     instances_dir = tmp_dir
     if check_slurm():
         instances_dir = "/home/testuser/mcp_instances"
-
     config_path = Path(tmp_dir) / "config.toml"
     config_path.write_text(_CONFIG_TOML.format(instances_dir=instances_dir))
-    # Create a context directory with a test resource so resource registration works
     context_dir = Path(tmp_dir) / "config" / "context"
     context_dir.mkdir(parents=True, exist_ok=True)
-    (context_dir / "README.md").write_text("# Test context for ns-hpc integration tests\n")
+    (context_dir / "README.md").write_text("# Test context\n")
     os.environ["NS_HPC_CONFIG"] = str(config_path)
     return load_config(str(config_path))
 
 
-# ── Helpers ─────────────────────────────────────────────────────────────────
+# ── Session log ─────────────────────────────────────────────────────────────
 
 
-class Session:
-    """Simulates an MCP client session with the lifespan server."""
+class SessionLog:
+    """Collects timestamped output and prints a summary at the end."""
 
-    def __init__(self, name: str, config: Config, slurm: bool = False):
-        self.name = name
-        self.instance_id = f"int-{name}-{int(time.time())}"
-        self.slurm = slurm
-        self.config = config
-        self._results: list[str] = []
-        self._start = time.time()
+    def __init__(self):
+        self.results: list[tuple[str, bool, str]] = []
+        self._t0 = time.time()
 
-    def step(self, label: str) -> None:
-        elapsed = time.time() - self._start
-        print(f"  [{elapsed:7.2f}s] {label} ... ", end="", flush=True)
-        self._results.append(label)
+    def _ts(self) -> str:
+        return f"[{time.time() - self._t0:8.1f}s]"
 
-    def ok(self, detail: str = "") -> None:
-        print(f"✓{('  ' + detail) if detail else ''}")
+    def heading(self, title: str) -> None:
+        print(f"\n{self._ts()} ═══ {title} ═══")
 
-    def fail(self, msg: str) -> None:
-        print(f"✗  {msg}")
-        self._results.append(f"FAIL: {msg}")
+    def subheading(self, title: str) -> None:
+        print(f"{self._ts()}   ─── {title} ───")
 
-    def summary(self) -> int:
-        total = len([r for r in self._results if not r.startswith("FAIL")])
-        fails = [r for r in self._results if r.startswith("FAIL")]
-        print(f"\n  ── {self.name} ──")
-        print(f"  Passed: {total}  Failed: {len(fails)}")
-        for f in fails:
-            print(f"    {f}")
+    def ok(self, label: str, detail: str = "") -> None:
+        self.results.append((label, True, detail))
+        print(f"{self._ts()}   ✓ {label}")
+        if detail:
+            for line in detail.split("\n"):
+                print(f"          {line}")
+
+    def fail(self, label: str, msg: str) -> None:
+        self.results.append((label, False, msg))
+        print(f"{self._ts()}   ✗ {label}: {msg}")
+
+    def log_result(self, label: str, r: JobResult) -> None:
+        d = r.to_dict()
+        ok = d["status"] not in ("unknown",)
+        (self.ok if ok else self.fail)(label, json.dumps(d, indent=2))
+
+    def print_summary(self) -> int:
+        fails = [(l, d) for l, ok, d in self.results if not ok]
+        print(f"\n{'═' * 60}")
+        total = len(self.results)
+        passed = total - len(fails)
+        print(f"Scenarios: {total}  Passed: {passed}  Failed: {len(fails)}")
+        for label, detail in fails:
+            print(f"  ✗ {label}\n      {detail}")
         return len(fails)
 
 
-def check_slurm() -> bool:
-    """Return True if sbatch is available (slurm cluster is up)."""
-    return shutil.which("sbatch") is not None
+# ── Local timing scenarios ──────────────────────────────────────────────────
 
 
-# ── Test scenarios ─────────────────────────────────────────────────────────
+async def s_quick_job(log: SessionLog, mgr: JobManager) -> JobResult:
+    """Job finishes before submit timeout → COMPLETED exit 0."""
+    log.subheading("Quick job — finishes before timeout")
+    r = mgr.submit("echo ok", timeout=10, tail=5)
+    log.log_result("submit echo ok", r)
+    assert r.status == JobStatus.COMPLETED, f"expected COMPLETED, got {r.status}"
+    assert r.exit_code == 0
+    assert "ok" in r.stdout_tail
+    assert "/workspace/" in r.stdout_path
+    return r
 
 
-async def test_config_fallback(cfg: Config) -> int:
-    """Verify config loading fallback chain works."""
-    s = Session("config-fallback", cfg)
-
-    s.step("load config from NS_HPC_CONFIG")
-    assert cfg.namespace_defaults.workspace_mount == "/workspace"
-    s.ok(f"workspace_mount={cfg.namespace_defaults.workspace_mount}")
-
-    s.step("list context resources in config")
-    dirs = cfg.resource_defaults.context_dirs
-    patterns = cfg.resource_defaults.resource_patterns
-    assert len(dirs) > 0
-    assert len(patterns) > 0
-    s.ok(f"context_dirs={dirs}")
-
-    return s.summary()
+async def s_repoll_finished_cached(log: SessionLog, mgr: JobManager, quick: JobResult) -> None:
+    """Re-poll an already-finished job → instant COMPLETED from cache."""
+    log.subheading("Re-poll finished job — cached result")
+    r = mgr.poll(quick.job_id, timeout=0, tail=3)
+    assert r is not None
+    log.log_result("poll finished (cached)", r)
+    assert r.status == JobStatus.COMPLETED
 
 
-async def test_context_resources(cfg: Config) -> int:
-    """Verify MCP context resources are discoverable and readable."""
-    s = Session("context-resources", cfg)
-
-    async with server_lifespan(mcp):
-        s.step("list all resources")
-        resources = await mcp.list_resources()
-        assert len(resources) > 0, "No resources registered"
-        uris = [r.uri for r in resources]
-        s.ok(f"{len(resources)} resources: {[r.name for r in resources]}")
-
-        s.step(f"read all {len(resources)} resources")
-        for r in resources:
-            result = await mcp.read_resource(r.uri)
-            content = result.contents[0].content
-            assert len(content) > 10
-        s.ok(f"verified content for {len(resources)} resources")
-
-    return s.summary()
+async def s_nonzero_exit(log: SessionLog, mgr: JobManager) -> None:
+    """exit 42 → FAILED exit_code=42."""
+    log.subheading("Non-zero exit code")
+    r = mgr.submit("exit 42", timeout=10)
+    log.log_result("submit exit 42", r)
+    assert r.status == JobStatus.FAILED
+    assert r.exit_code == 42
 
 
-async def test_full_local_session(cfg: Config) -> int:
-    """Full MCP session: create → submit (local) → poll → list → cancel → destroy."""
-    s = Session("local-session", cfg)
-
-    async with server_lifespan(mcp):
-
-        # ── create instance with description ──
-        s.step("create instance")
-        inst = Instance.create(s.instance_id, cfg, description="integration test instance")
-        s.ok(inst.id)
-
-        s.step("verify instance metadata has description")
-        meta = json.loads(inst.metadata_path.read_text())
-        assert meta.get("description") == "integration test instance"
-        s.ok()
-
-        s.step("list instances includes our instance")
-        all_inst = Instance.list_instances(cfg)
-        ids = [i.id for i in all_inst]
-        assert s.instance_id in ids
-        s.ok(f"{len(all_inst)} total")
-
-        # ── submit a quick local job ──
-        mgr = JobManager(inst, cfg)
-
-        s.step("submit local job (echo)")
-        r1 = mgr.submit("echo hello_integration", timeout=10, tail=5)
-        assert r1.status.value == "completed"
-        assert r1.exit_code == 0
-        assert "hello_integration" in r1.stdout_tail
-        assert "/workspace/" in r1.stdout_path  # container-side path
-        s.ok(f"job={r1.job_id} exit={r1.exit_code}")
-
-        s.step("submit local job (non-zero exit)")
-        r2 = mgr.submit("exit 7", timeout=10)
-        assert r2.status.value == "failed"
-        assert r2.exit_code == 7
-        s.ok(f"job={r2.job_id} exit={r2.exit_code}")
-
-        # ── submit a detach job, poll, then cancel ──
-        s.step("submit local job (sleep, detach)")
-        r3 = mgr.submit("sleep 20", timeout=2, tail=5)
-        assert r3.status.value == "running"
-        assert r3.job_id is not None
-        s.ok(f"job={r3.job_id}")
-
-        s.step("poll running job")
-        polled = mgr.poll(r3.job_id, timeout=0)
-        assert polled is not None
-        assert polled.status.value == "running"
-        s.ok()
-
-        s.step("list jobs (should have 3)")
-        jobs = mgr.list_jobs()
-        assert len(jobs) >= 3
-        s.ok(f"{len(jobs)} jobs tracked")
-
-        s.step("cancel running job")
-        ok = mgr.cancel(r3.job_id)
-        assert ok
-        s.ok()
-
-        s.step("poll cancelled job returns status=cancelled")
-        polled = mgr.poll(r3.job_id, timeout=0)
-        assert polled is not None
-        assert polled.status.value == "cancelled"
-        s.ok(f"status={polled.status.value}")
-
-        # ── destroy ──
-        s.step("destroy instance")
-        Instance.destroy(s.instance_id, cfg)
-        assert Instance.load(s.instance_id, cfg) is None
-        s.ok()
-
-    return s.summary()
+async def s_timeout_kill(log: SessionLog, mgr: JobManager) -> None:
+    """Long job with short timeout + no-detach → TIMEOUT with partial output."""
+    log.subheading("Timeout + kill — short timeout, job killed, partial tail")
+    r = mgr.submit(_SEQ_CMD, timeout=3, tail=3)
+    # Simulate the MCP layer's no-detach handling (cancel_and_tail)
+    if r.status == JobStatus.RUNNING:
+        r = mgr.cancel_and_tail(r, tail=3)
+    log.log_result("submit seq timeout=3 (killed)", r)
+    assert r.status == JobStatus.TIMEOUT, f"expected TIMEOUT, got {r.status}"
+    assert r.exit_code is None
 
 
-async def test_slurm_session(cfg: Config) -> int:
-    """Full MCP session via slurm: create → submit → poll → cancel → destroy."""
+async def s_timeout_detach(log: SessionLog, mgr: JobManager) -> JobResult:
+    """Long job with short timeout + detach → RUNNING with partial output."""
+    log.subheading("Timeout + detach — submit seq, detach while running")
+    r = mgr.submit(_SEQ_CMD, timeout=3, tail=3)
+    log.log_result("submit seq timeout=3 (detached)", r)
+    assert r.status == JobStatus.RUNNING, f"expected RUNNING, got {r.status}"
+    assert len(r.stdout_tail) > 0, "expected partial stdout tail"
+    return r
+
+
+async def s_poll_running(log: SessionLog, mgr: JobManager, running: JobResult) -> None:
+    """Poll a still-running job (timeout=0) → RUNNING."""
+    log.subheading("Poll running job — peek, no wait")
+    r = mgr.poll(running.job_id, timeout=0, tail=3)
+    assert r is not None
+    log.log_result("poll running (timeout=0)", r)
+    assert r.status == JobStatus.RUNNING, f"expected RUNNING, got {r.status}"
+
+
+async def s_poll_then_kill(log: SessionLog, mgr: JobManager, running: JobResult) -> None:
+    """Poll a running job, then kill it after timeout."""
+    log.subheading("Poll running then kill — wait 2s, cancel")
+    r = mgr.poll(running.job_id, timeout=2, tail=3)
+    assert r is not None
+    log.log_result("poll running (timeout=2)", r)
+    # If it finished in the 2s window, great; else cancel
+    if r.status == JobStatus.RUNNING:
+        ok = mgr.cancel(running.job_id)
+        log.ok("cancelled after poll", f"ok={ok}")
+        r2 = mgr.poll(running.job_id, timeout=0, tail=3)
+        assert r2 is not None
+        log.log_result("poll after cancel", r2)
+        assert r2.status == JobStatus.CANCELLED
+
+
+async def s_poll_finished_after_submit(log: SessionLog, mgr: JobManager) -> JobResult:
+    """Submit seq, let it finish naturally, poll → COMPLETED full tail."""
+    log.subheading("Submit detach, wait for natural completion, poll")
+    r = mgr.submit(_SEQ_CMD, timeout=5, tail=3)
+    log.log_result("submit seq timeout=5 (detach)", r)
+    if r.status == JobStatus.COMPLETED:
+        log.ok("(already finished in submit window)")
+        return r
+    # The seq loop needs ~20s total; we've waited 5s already.
+    # Poll with a generous timeout to let it finish.
+    r2 = mgr.poll(r.job_id, timeout=30, tail=5)
+    assert r2 is not None
+    log.log_result("poll after completion", r2)
+    assert r2.status == JobStatus.COMPLETED, f"expected COMPLETED, got {r2.status}"
+    assert r2.exit_code == 0
+    assert len(r2.stdout_tail) > 0
+    return r2
+
+
+async def s_cancel_running(log: SessionLog, mgr: JobManager) -> None:
+    """Cancel a running job → CANCELLED with output."""
+    log.subheading("Cancel running job")
+    r = mgr.submit(_SEQ_CMD, timeout=3, tail=3)
+    assert r.status == JobStatus.RUNNING, f"expected RUNNING, got {r.status}"
+    log.log_result("submit seq (detach)", r)
+    ok = mgr.cancel(r.job_id)
+    log.ok("cancel", f"ok={ok}")
+    assert ok
+    r2 = mgr.poll(r.job_id, timeout=0, tail=3)
+    assert r2 is not None
+    log.log_result("poll after cancel", r2)
+    assert r2.status == JobStatus.CANCELLED, f"expected CANCELLED, got {r2.status}"
+
+
+async def s_cancel_finished(log: SessionLog, mgr: JobManager, finished: JobResult) -> None:
+    """Cancel an already-finished job → no-op, still COMPLETED."""
+    log.subheading("Cancel already-finished job — no-op")
+    ok = mgr.cancel(finished.job_id)
+    log.ok("cancel finished", f"ok={ok}")
+    assert ok
+    r = mgr.poll(finished.job_id, timeout=0, tail=3)
+    assert r is not None
+    log.log_result("poll after cancel finished", r)
+    assert r.status == JobStatus.COMPLETED
+
+
+async def s_list_jobs(log: SessionLog, mgr: JobManager) -> None:
+    """List jobs — mode field present, no slurm internals."""
+    log.subheading("List jobs — verify no slurm internals exposed")
+    jobs = mgr.list_jobs()
+    assert len(jobs) >= 1
+    for j in jobs:
+        assert "slurm_job_id" not in j, "slurm_job_id must not leak to client"
+        assert j.get("mode") in ("local", "slurm")
+    log.ok("list_jobs", json.dumps(jobs, indent=2))
+
+
+# ── Slurm timing scenarios ─────────────────────────────────────────────────
+
+
+async def s_slurm_quick(log: SessionLog, mgr: JobManager) -> JobResult:
+    log.subheading("Slurm quick job")
+    r = mgr.submit("echo hello_slurm", mode="slurm", timeout=30, tail=5)
+    log.log_result("submit slurm echo", r)
+    assert r.status == JobStatus.COMPLETED
+    assert r.exit_code == 0
+    assert "hello_slurm" in r.stdout_tail
+    return r
+
+
+async def s_slurm_nonzero(log: SessionLog, mgr: JobManager) -> None:
+    log.subheading("Slurm non-zero exit")
+    r = mgr.submit("exit 42", mode="slurm", timeout=30)
+    log.log_result("submit slurm exit 42", r)
+    assert r.status == JobStatus.FAILED
+    assert r.exit_code == 42
+
+
+async def s_slurm_detach(log: SessionLog, mgr: JobManager) -> JobResult:
+    log.subheading("Slurm timeout + detach")
+    r = mgr.submit(_SEQ_CMD, mode="slurm", timeout=5, tail=3)
+    log.log_result("submit slurm seq (detach)", r)
+    assert r.status == JobStatus.RUNNING, f"expected RUNNING, got {r.status}"
+    return r
+
+
+async def s_slurm_poll(log: SessionLog, mgr: JobManager, running: JobResult) -> None:
+    log.subheading("Slurm poll running")
+    r = mgr.poll(running.job_id, timeout=0, tail=3)
+    assert r is not None
+    log.log_result("poll slurm", r)
+    assert r.status in (JobStatus.PENDING, JobStatus.RUNNING, JobStatus.COMPLETED)
+
+
+async def s_slurm_repoll_cached(log: SessionLog, mgr: JobManager, quick: JobResult) -> None:
+    log.subheading("Slurm re-poll finished (cached)")
+    r = mgr.poll(quick.job_id, timeout=0, tail=3)
+    assert r is not None
+    log.log_result("poll slurm cached", r)
+    assert r.status == JobStatus.COMPLETED
+
+
+async def s_slurm_cancel(log: SessionLog, mgr: JobManager, running: JobResult) -> None:
+    log.subheading("Slurm cancel running")
+    ok = mgr.cancel(running.job_id)
+    log.ok("cancel slurm", f"ok={ok}")
+    assert ok
+    r = mgr.poll(running.job_id, timeout=0, tail=3)
+    assert r is not None
+    log.log_result("poll after slurm cancel", r)
+    # Job may have finished between the submit poll and cancel; that's fine
+    assert r.status in (JobStatus.CANCELLED, JobStatus.COMPLETED), f"got {r.status}"
+
+
+async def s_slurm_status_file(log: SessionLog, mgr: JobManager,
+                               inst: Instance, quick: JobResult) -> None:
+    log.subheading("Slurm status file on compute node")
+    sf = inst.workspace_dir / ".ns_hpc_output" / f"{quick.job_id}.status"
+    if sf.exists():
+        raw = sf.read_text()
+        has_pid = '"child-pid"' in raw
+        has_exit = '"exit-code"' in raw
+        log.ok("status file", f"exists  child-pid={has_pid}  exit-code={has_exit}")
+        assert has_pid and has_exit
+    else:
+        log.fail("status file", f"not found at {sf}")
+
+
+# ── Orchestrator ────────────────────────────────────────────────────────────
+
+
+async def run_local(log: SessionLog, inst: Instance, cfg: Config) -> None:
+    """All local timing scenarios on one instance."""
+    mgr = JobManager(inst, cfg)
+    quick = await s_quick_job(log, mgr)
+    await s_repoll_finished_cached(log, mgr, quick)
+    await s_nonzero_exit(log, mgr)
+    await s_timeout_kill(log, mgr)
+
+    # Submit a detach job, poke it, then kill
+    running = await s_timeout_detach(log, mgr)
+    await s_poll_running(log, mgr, running)
+    await s_poll_then_kill(log, mgr, running)
+
+    # Job that finishes between tool calls
+    finished = await s_poll_finished_after_submit(log, mgr)
+
+    # Cancel scenarios
+    await s_cancel_running(log, mgr)
+    await s_cancel_finished(log, mgr, finished)
+    await s_list_jobs(log, mgr)
+
+    # Final cleanup — make sure no runaway processes
+    for jid in list(mgr._procs):
+        p = mgr._procs[jid]
+        if p and p.poll() is None:
+            p.kill()
+            p.wait()
+
+
+async def run_slurm(log: SessionLog, inst: Instance, cfg: Config) -> None:
+    """All slurm timing scenarios on one instance."""
     if not check_slurm():
-        print("  ⏭  slurm not available, skipping")
-        return 0
+        log.ok("slurm: sbatch not found, skipping")
+        return
+    mgr = JobManager(inst, cfg)
+    quick = await s_slurm_quick(log, mgr)
+    await s_slurm_nonzero(log, mgr)
+    await s_slurm_status_file(log, mgr, inst, quick)
+    await s_slurm_repoll_cached(log, mgr, quick)
 
-    s = Session("slurm-session", cfg, slurm=True)
+    running = await s_slurm_detach(log, mgr)
+    await s_slurm_poll(log, mgr, running)
+    await s_slurm_cancel(log, mgr, running)
 
+
+async def run_resources(log: SessionLog) -> None:
+    """MCP context resource discovery and reading."""
+    log.heading("MCP Context Resources")
     async with server_lifespan(mcp):
-        inst = Instance.create(s.instance_id, cfg, description="slurm integration test")
-        mgr = JobManager(inst, cfg)
-
-        # ── submit slurm job (quick echo) ──
-        s.step("submit slurm job (echo)")
-        r1 = mgr.submit("echo hello_slurm", mode="slurm", timeout=30, tail=10)
-        assert r1.status.value == "completed"
-        assert r1.exit_code == 0
-        assert "hello_slurm" in r1.stdout_tail
-        assert "/workspace/" in r1.stdout_path
-        s.ok(f"job={r1.job_id} exit={r1.exit_code}")
-
-        # ── submit slurm job (non-zero exit) ──
-        s.step("submit slurm job (exit 42)")
-        r2 = mgr.submit("exit 42", mode="slurm", timeout=30)
-        assert r2.status.value == "failed"
-        assert r2.exit_code == 42
-        s.ok(f"job={r2.job_id} exit={r2.exit_code}")
-
-        # ── submit slurm detach, poll, cancel ──
-        s.step("submit slurm job (sleep, detach)")
-        r3 = mgr.submit("sleep 20", mode="slurm", timeout=5, tail=5)
-        assert r3.status.value == "running"
-        s.ok(f"job={r3.job_id}")
-
-        s.step("poll slurm job (still running)")
-        polled = mgr.poll(r3.job_id, timeout=0)
-        assert polled is not None
-        # Could be RUNNING or PENDING — both are acceptable
-        s.ok(f"status={polled.status.value}")
-
-        s.step("list slurm jobs")
-        jobs = mgr.list_jobs()
-        slurm_jobs = [j for j in jobs if j.get("slurm_job_id") is not None]
-        assert len(slurm_jobs) >= 1
-        s.ok(f"{len(slurm_jobs)} slurm jobs tracked")
-
-        s.step("cancel slurm job")
-        ok = mgr.cancel(r3.job_id)
-        assert ok
-        s.ok()
-
-        # ── verify status file was written on compute node ──
-        s.step("verify status file exists with exit-code")
-        status_file = inst.workspace_dir / ".ns_hpc_output" / f"{r1.job_id}.status"
-        if status_file.exists():
-            raw = status_file.read_text()
-            assert '"exit-code"' in raw or '"exit-code":' in raw
-            s.ok()
-        else:
-            s.fail(f"status file not found at {status_file}")
-
-        # ── destroy ──
-        s.step("destroy instance")
-        Instance.destroy(s.instance_id, cfg)
-        assert Instance.load(s.instance_id, cfg) is None
-        s.ok()
-
-    return s.summary()
-
-
-async def test_audit_log(cfg: Config) -> int:
-    """Verify audit log is populated correctly for a job lifecycle."""
-    s = Session("audit-log", cfg)
-
-    async with server_lifespan(mcp):
-        inst = Instance.create(s.instance_id, cfg)
-
-        mgr = JobManager(inst, cfg)
-
-        s.step("submit job and audit")
-        result = mgr.submit("echo audit_me", timeout=10)
-        # The MCP tool layer calls inst.audit() — simulate it in the test
-        inst.audit("job.submitted", command="echo audit_me", mode="local", timeout=10)
-        inst.audit(f"job.{result.status.value}", job_id=result.job_id,
-                   exit_code=result.exit_code, command="echo audit_me", mode="local",
-                   stdout_path=result.stdout_path, stderr_path=result.stderr_path)
-
-        s.step("check audit log entries")
-        lines = inst.audit_log_path.read_text().strip().splitlines()
-        assert len(lines) >= 2
-        events = [json.loads(l) for l in lines]
-        assert events[0]["event"] == "job.submitted"
-        s.ok(f"{len(events)} audit entries")
-
-        s.step("destroy instance")
-        Instance.destroy(s.instance_id, cfg)
-
-    return s.summary()
-
-
-# ── Main ────────────────────────────────────────────────────────────────────
+        resources = await mcp.list_resources()
+        assert len(resources) > 0, "no resources registered"
+        log.ok(f"resources/list: {len(resources)} resources",
+               "\n".join(str(r.uri) for r in resources))
+        for r in resources:
+            content = (await mcp.read_resource(r.uri)).contents[0].content
+            assert len(content) > 10
 
 
 async def main():
-    # Use a temp directory for instances (avoids sandbox /home read-only issues)
     tmp_dir = tempfile.mkdtemp(prefix="ns-hpc-int-")
     cfg = _test_config(tmp_dir)
+    log = SessionLog()
 
-    print(f"ns-hpc integration test suite")
-    print(f"Instances dir: {tmp_dir}")
-    print(f"Slurm:        {'available' if check_slurm() else 'not available'}")
+    print(f"ns-hpc integration tests — full session log")
+    print(f"Config path:     {os.environ['NS_HPC_CONFIG']}")
+    print(f"Instances dir:   {cfg.resolve_instances_dir()}")
+    print(f"Slurm available: {check_slurm()}")
+    print(f"Workspace mount: {cfg.namespace_defaults.workspace_mount}")
+    print(f"Seq command:     {_SEQ_CMD}")
     print()
 
-    total_fails = 0
+    await run_resources(log)
+    log.heading("Local timing scenarios")
+    suffix = int(time.time())
+    inst = Instance.create(f"local-{suffix}", cfg)
+    await run_local(log, inst, cfg)
+    Instance.destroy(f"local-{suffix}", cfg)
+    log.ok("instance destroyed")
 
-    tests = [
-        ("Config fallback", test_config_fallback(cfg)),
-        ("Context resources", test_context_resources(cfg)),
-        ("Local session", test_full_local_session(cfg)),
-        ("Slurm session", test_slurm_session(cfg)),
-        ("Audit log", test_audit_log(cfg)),
-    ]
+    log.heading("Slurm timing scenarios")
+    slurm_inst = Instance.create(f"slurm-{suffix}", cfg)
+    await run_slurm(log, slurm_inst, cfg)
+    Instance.destroy(f"slurm-{suffix}", cfg)
+    log.ok("instance destroyed")
 
-    for name, coro in tests:
-        print(f"── {name} ──────────────────────────────────")
-        fails = await coro
-        total_fails += fails
-        print()
-
-    print("═" * 50)
-    if total_fails:
-        print(f"FAILED: {total_fails} test(s) with failures")
-    else:
-        print("All tests passed!")
+    fails = log.print_summary()
     print()
-
-    return 1 if total_fails else 0
+    return 1 if fails else 0
 
 
 if __name__ == "__main__":

@@ -472,10 +472,17 @@ class JobManager:
 
         # Recovery path: no process handle (server restart) — poll status file
         if timeout > 0 and proc is None:
+            status_fd = self.config.namespace_defaults.status_fd
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 finished, exit_code, _ = self._read_status_file(status_path)
                 if finished:
+                    break
+                # Process may have died without writing exit-code — check /proc
+                pid = entry.get("pid", -1)
+                if not self._is_bwrap_alive(pid, status_fd, entry.get("status_path", "")):
+                    exit_code = -1
+                    finished = True
                     break
                 time.sleep(0.2)
             if not finished:
@@ -639,12 +646,13 @@ class JobManager:
                     proc.kill()
                     proc.wait()
             elif proc is None and "status_path" in entry:
-                # No proc handle (recovery) — send SIGTERM to stored PID first
+                # No proc handle (recovery) — verify PID isn't reused,
+                # then send SIGTERM first.
                 pid = entry.get("pid")
-                if pid is not None:
+                status_fd = self.config.namespace_defaults.status_fd
+                if pid is not None and self._is_bwrap_alive(pid, status_fd, entry["status_path"]):
                     try:
                         os.kill(pid, signal.SIGTERM)
-                        # Poll /proc until it dies or timeout
                         deadline = time.monotonic() + 5
                         while time.monotonic() < deadline:
                             if not Path(f"/proc/{pid}").exists():

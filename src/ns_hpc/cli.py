@@ -90,10 +90,13 @@ def bwrap(
         raise typer.Exit(code=1)
 
     fd = cfg.namespace_defaults.status_fd
+    shared_output_root = cfg.resolve_instances_dir() / "output"
     argv = build_bwrap_args(
         command=list(command),
         workspace_host_path=str(inst.workspace_dir),
         config=cfg,
+        extra_rw_binds=[(str(inst.output_path), "/output")],
+        extra_ro_binds=[(str(shared_output_root), "/shared-output")],
         extra_bwrap_flags=["--json-status-fd", str(fd)],
     )
     os.execvp(bwrap_path, argv)
@@ -366,9 +369,12 @@ def enter(
         print(f"Error: instance '{instance_id}' not found.", file=sys.stderr)
         raise typer.Exit(code=1)
 
+    shared_output_root = cfg.resolve_instances_dir() / "output"
     argv = build_bwrap_args(
         command=["/bin/bash", "-i"],
         workspace_host_path=str(inst.workspace_dir),
         config=cfg,
+        extra_rw_binds=[(str(inst.output_path), "/output")],
+        extra_ro_binds=[(str(shared_output_root), "/shared-output")],
     )
     os.execvp("bwrap", argv)

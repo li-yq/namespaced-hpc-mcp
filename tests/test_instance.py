@@ -25,11 +25,15 @@ def test_create_instance(tmp_path):
     inst = Instance.create("test-001", cfg)
     assert inst.exists
     assert inst.workspace_dir.exists()
-    assert inst.output_dir.exists()
+    assert inst.output_path.exists()
     assert inst.metadata_path.exists()
     metadata = json.loads(inst.metadata_path.read_text())
     assert metadata["id"] == "test-001"
     assert "created_at" in metadata
+    # Shared output directory structure
+    shared_root = cfg.resolve_instances_dir() / "output"
+    assert shared_root.exists()
+    assert (shared_root / "test-001").exists()
 
 
 def test_create_duplicate(tmp_path):

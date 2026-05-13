@@ -24,7 +24,11 @@ class Instance:
         self.workspace_dir = base_dir / "workspace"
         self.audit_log_path = base_dir / "audit.log"
         self.metadata_path = base_dir / "metadata.json"
-        self.output_dir = base_dir / "output"  # TODO: unused — JobManager writes to workspace/.ns_hpc_output instead
+
+    @property
+    def output_path(self) -> Path:
+        """Shared output directory at ``{instances_dir}/output/{id}/``."""
+        return self.base_dir.parent / "output" / self.id
 
     @property
     def exists(self) -> bool:
@@ -54,7 +58,11 @@ class Instance:
 
         base_dir.mkdir(parents=True, exist_ok=True)
         (base_dir / "workspace").mkdir(parents=True, exist_ok=True)
-        (base_dir / "output").mkdir(parents=True, exist_ok=True)
+
+        # Shared output directory
+        shared_root = instances_dir / "output"
+        shared_root.mkdir(parents=True, exist_ok=True)
+        (shared_root / instance_id).mkdir(parents=True, exist_ok=True)
 
         metadata = {
             "id": instance_id,
@@ -96,6 +104,10 @@ class Instance:
         if not base_dir.exists():
             return False
         shutil.rmtree(base_dir)
+        # Also remove shared output directory
+        shared_dir = config.resolve_instances_dir() / "output" / instance_id
+        if shared_dir.exists():
+            shutil.rmtree(shared_dir)
         return True
 
     # ── Audit logging ────────────────────────────────────────────────────

@@ -305,6 +305,8 @@ class JobManager:
         Creates the job via ``_submit_local`` or ``_submit_slurm``,
         then delegates to ``poll()`` so the wait logic is shared.
         """
+        if not command.strip():
+            raise ValueError("command must not be empty")
         job_id = self._next_job_id()
         output_dir = self._ensure_output_dir()
         status_fd = self.config.namespace_defaults.status_fd
@@ -495,21 +497,11 @@ class JobManager:
                 status_path.stat().st_mtime, tz=timezone.utc
             ).isoformat()
             created = datetime.fromisoformat(entry["created_at"])
-            duration = (
-                datetime.fromisoformat(entry["finished_at"]) - created
-            ).total_seconds()
-            entry["duration"] = round(duration, 2)
-            self._save_jobs()
-            return JobResult(
-                job_id=job_id,
-                status=JobStatus.COMPLETED if exit_code == 0 else JobStatus.FAILED,
-                exit_code=exit_code,
-                stdout_tail=_tail_file(stdout_path, tail),
-                stderr_tail=_tail_file(stderr_path, tail),
-                stdout_path=_container_path(str(stdout_path), self.instance, self.config),
-                stderr_path=_container_path(str(stderr_path), self.instance, self.config),
-                duration=entry["duration"],
+            entry["duration"] = round(
+                (datetime.fromisoformat(entry["finished_at"]) - created).total_seconds(), 2
             )
+            self._save_jobs()
+            return self._result_from_entry(job_id, entry, tail)
 
         return JobResult(
             job_id=job_id,
@@ -647,13 +639,21 @@ class JobManager:
                     proc.kill()
                     proc.wait()
             elif proc is None and "status_path" in entry:
-                # No proc handle — try killing by outer PID from stored entry
+                # No proc handle (recovery) — send SIGTERM to stored PID first
                 pid = entry.get("pid")
                 if pid is not None:
                     try:
-                        os.kill(pid, signal.SIGKILL)
+                        os.kill(pid, signal.SIGTERM)
+                        # Poll /proc until it dies or timeout
+                        deadline = time.monotonic() + 5
+                        while time.monotonic() < deadline:
+                            if not Path(f"/proc/{pid}").exists():
+                                break
+                            time.sleep(0.2)
+                        else:
+                            os.kill(pid, signal.SIGKILL)
                     except OSError:
-                        pass  # process already gone
+                        pass
         else:
             slurm_job_id = entry.get("slurm_job_id")
             if slurm_job_id:

@@ -132,7 +132,7 @@ class JobManager:
         # In-memory subprocess handles for local (running) jobs
         self._procs: dict[str, subprocess.Popen] = {}
         # Disk-persisted job metadata
-        self._jobs_path = instance.workspace_dir / ".ns_hpc_jobs.json"
+        self._jobs_path = instance.base_dir / ".ns_hpc_jobs.json"
         self._jobs = self._load_jobs()
         self._fixup_stale_jobs()
 
@@ -207,7 +207,7 @@ class JobManager:
 
     def _status_dir(self) -> Path:
         """Directory for bwrap status files — outside workspace mount."""
-        p = self.instance.output_dir
+        p = self.instance.base_dir / "status"
         p.mkdir(parents=True, exist_ok=True)
         return p
 
@@ -553,11 +553,7 @@ class JobManager:
         stderr_path: Path = Path(entry["stderr_path"])
 
         if slurm_job_id is None:
-            return JobResult(
-                job_id=job_id, status=JobStatus.UNKNOWN,
-                stdout_path=_container_path(str(stdout_path), self.instance, self.config),
-                stderr_path=_container_path(str(stderr_path), self.instance, self.config),
-            )
+            raise ValueError("slurm job has no slurm_job_id — bug: entry was submitted without one")
 
         deadline = time.monotonic() + timeout if timeout > 0 else None
 
@@ -642,7 +638,8 @@ class JobManager:
                     duration=self._duration_since_created(entry),
                 )
 
-            time.sleep(2)
+            # sleep between sacct queries — slurmdbd warns against tight polling loops
+            time.sleep(5)
 
     def cancel(self, job_id: str) -> bool:
         """Cancel a running job.  Returns True if cancelled."""

@@ -179,7 +179,7 @@ def run(
     print(f"stdout: {result.stdout_path}")
     print(f"stderr: {result.stderr_path}")
 
-    if result.status in ("failed", "timeout"):
+    if result.status in ("failed",):
         raise typer.Exit(code=result.exit_code or 1)
 
 

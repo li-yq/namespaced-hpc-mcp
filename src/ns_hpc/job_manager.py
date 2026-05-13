@@ -52,7 +52,6 @@ class JobStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
-    TIMEOUT = "timeout"
     UNKNOWN = "unknown"
 
 
@@ -414,7 +413,7 @@ class JobManager:
             return None
 
         status = entry.get("status")
-        if status in ("completed", "failed", "cancelled", "timeout", "unknown"):
+        if status in ("completed", "failed", "cancelled", "unknown"):
             return self._result_from_entry(job_id, entry, tail)
 
         if entry["mode"] == "local":
@@ -579,7 +578,7 @@ class JobManager:
                     duration=entry["duration"],
                 )
 
-            if state in ("FAILED", "TIMEOUT", "NODE_FAIL", "CANCELLED"):
+            if state in ("FAILED", "TIMEOUT", "NODE_FAIL"):
                 # Prefer exit code from status file (more precise than sacct)
                 if ec is None and "status_path" in entry:
                     _, st = self._read_status_file(Path(entry["status_path"]))
@@ -591,6 +590,26 @@ class JobManager:
                 self._save_jobs()
                 return JobResult(
                     job_id=job_id, status=JobStatus.FAILED,
+                    exit_code=ec if ec is not None else -1,
+                    stdout_tail=_tail_file(stdout_path, tail),
+                    stderr_tail=_tail_file(stderr_path, tail),
+                    stdout_path=_container_path(str(stdout_path), self.instance, self.config),
+                    stderr_path=_container_path(str(stderr_path), self.instance, self.config),
+                    duration=entry["duration"],
+                )
+
+            if state == "CANCELLED":
+                # Externally cancelled (e.g. scancel, preemption)
+                if ec is None and "status_path" in entry:
+                    _, st = self._read_status_file(Path(entry["status_path"]))
+                    ec = st
+                entry["status"] = "cancelled"
+                entry["exit_code"] = ec if ec is not None else -1
+                entry["finished_at"] = datetime.now(timezone.utc).isoformat()
+                entry["duration"] = round(self._duration_since_created(entry), 2)
+                self._save_jobs()
+                return JobResult(
+                    job_id=job_id, status=JobStatus.CANCELLED,
                     exit_code=ec if ec is not None else -1,
                     stdout_tail=_tail_file(stdout_path, tail),
                     stderr_tail=_tail_file(stderr_path, tail),
@@ -626,7 +645,7 @@ class JobManager:
             return False
 
         # Already in a terminal state — nothing to cancel
-        if entry.get("status") in ("completed", "failed", "cancelled", "timeout", "unknown"):
+        if entry.get("status") in ("completed", "failed", "cancelled", "unknown"):
             return True
 
         if entry["mode"] == "local":
@@ -672,11 +691,10 @@ class JobManager:
         self.cancel(result.job_id)
         result.stdout_tail = _tail_file(Path(result.stdout_path), tail)
         result.stderr_tail = _tail_file(Path(result.stderr_path), tail)
-        result.status = JobStatus.TIMEOUT
-        # Override the "cancelled" status set by cancel() to "timeout"
+        result.status = JobStatus.CANCELLED
         entry = self._jobs.get(result.job_id)
         if entry is not None:
-            entry["status"] = "timeout"
+            entry["status"] = "cancelled"
             self._save_jobs()
         return result
 

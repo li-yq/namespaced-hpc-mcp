@@ -164,7 +164,7 @@ async def s_timeout_kill(log: SessionLog, mgr: JobManager) -> None:
     if r.status == JobStatus.RUNNING:
         r = mgr.cancel_and_tail(r, tail=3)
     log.log_result("submit seq timeout=3 (killed)", r)
-    assert r.status == JobStatus.TIMEOUT, f"expected TIMEOUT, got {r.status}"
+    assert r.status == JobStatus.CANCELLED, f"expected CANCELLED, got {r.status}"
     assert r.exit_code is None
 
 

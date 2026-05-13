@@ -156,6 +156,26 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
+def _warn_unknown_keys(data: dict, model_cls: type[BaseModel], prefix: str = "") -> None:
+    """Warn about keys in *data* that don't match the fields of *model_cls*.
+
+    Recurses into nested dicts whose field type is itself a Pydantic model.
+    Dict-of-model fields (e.g. ``proxied_mcps``) are not checked beyond the
+    top-level key since their keys are user-defined.
+    """
+    for key in data:
+        path = f"{prefix}.{key}" if prefix else key
+        if key not in model_cls.model_fields:
+            logger.warning("unrecognized config key '%s' will be ignored", path)
+            continue
+        val = data[key]
+        if isinstance(val, dict):
+            ft = model_cls.model_fields[key].annotation
+            # Directly nested Pydantic model (e.g. namespace_defaults → NamespaceDefaults)
+            if hasattr(ft, "model_fields"):
+                _warn_unknown_keys(val, ft, path)
+
+
 def load_config(path: str | Path | None = None) -> Config:
     """Load configuration by merging multiple layers.
 
@@ -174,6 +194,7 @@ def load_config(path: str | Path | None = None) -> Config:
     user_config = Path("~/.local/ns-hpc/config.toml").expanduser()
     if user_config.exists():
         data = _load_toml(user_config)
+        _warn_unknown_keys(data, Config)
         config_dict = _deep_merge(config_dict, data)
 
     # 3. Apply env-var or explicit path
@@ -183,6 +204,7 @@ def load_config(path: str | Path | None = None) -> Config:
         p = Path(path)
         if p.exists():
             data = _load_toml(p)
+            _warn_unknown_keys(data, Config)
             config_dict = _deep_merge(config_dict, data)
         else:
             logger.warning("config path %s not found, skipping", p)

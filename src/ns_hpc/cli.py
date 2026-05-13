@@ -67,9 +67,8 @@ def bwrap(
     """Run a command inside a bwrap sandbox with no output redirection or job tracking.
 
     This is the primitive that backs both local and Slurm job submission.
-    The command runs directly inside the sandbox.  bwrap uses
-    --die-with-parent so the sandbox is cleaned up when the parent
-    process dies.
+    The command runs directly inside the sandbox.  The sandbox namespace
+    is torn down by the kernel when the outer bwrap process exits.
 
     Use shell redirect for output capture:
 

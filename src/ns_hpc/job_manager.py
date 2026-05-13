@@ -177,8 +177,8 @@ class JobManager:
         * If ``config.job.proc_check`` is enabled (default), verify
           whether the bwrap process is alive via ``/proc`` (guarding
           against PID reuse).  If alive the job keeps running.
-        * Otherwise mark the job ``FAILED`` — the sandbox was killed
-          by ``--die-with-parent`` when the parent process exited.
+        * Otherwise mark the job ``FAILED`` — the bwrap process is
+          gone and the kernel has torn down the namespace.
         """
         changed = False
         cfg = self.config
@@ -371,7 +371,7 @@ class JobManager:
         """Submit via sbatch and persist the entry.  Does not wait."""
         status_fd = self.config.namespace_defaults.status_fd
         bwrap_cmd = (
-            f"{sys.executable} -m ns_hpc bwrap {self.instance.id} -- "
+            f"exec {sys.executable} -m ns_hpc bwrap {self.instance.id} -- "
             f"/bin/sh -c {shlex.quote(command)}"
             f" {status_fd}>{shlex.quote(str(status_path))}"
         )
@@ -638,7 +638,8 @@ class JobManager:
             proc = self._procs.pop(job_id, None)
             if proc and proc.poll() is None:
                 # Send SIGTERM first so the inner command can clean up.
-                # When the shell dies, --die-with-parent kills bwrap.
+                # Killing the outer bwrap triggers the kernel to tear
+                # down the namespace, killing all processes inside.
                 proc.terminate()
                 try:
                     proc.wait(timeout=5)

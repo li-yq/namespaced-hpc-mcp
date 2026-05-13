@@ -63,6 +63,7 @@ class JobResult:
     job_id: str
     status: JobStatus
     exit_code: Optional[int] = None
+    message: str = ""
     stdout_tail: str = ""
     stderr_tail: str = ""
     stdout_path: str = ""
@@ -74,6 +75,7 @@ class JobResult:
             "job_id": self.job_id,
             "status": self.status.value,
             "exit_code": self.exit_code,
+            "message": self.message,
             "stdout_tail": self.stdout_tail,
             "stderr_tail": self.stderr_tail,
             "stdout_path": self.stdout_path,
@@ -476,13 +478,22 @@ class JobManager:
     def _result_from_entry(self, job_id: str, entry: dict, tail: int) -> JobResult:
         """Build a JobResult from a persisted entry (already finished)."""
         status = JobStatus(entry.get("status", "unknown"))
+        ec = entry.get("exit_code")
         duration = entry.get("duration")
         if duration is None:
             duration = self._duration_since_created(entry)
+        message = ""
+        if status == JobStatus.FAILED:
+            message = f"job failed with exit code {ec}" if ec is not None else "job failed"
+        elif status == JobStatus.CANCELLED:
+            message = "job was cancelled"
+        elif status == JobStatus.UNKNOWN:
+            message = "job status is unknown"
         return JobResult(
             job_id=job_id,
             status=status,
-            exit_code=entry.get("exit_code"),
+            exit_code=ec,
+            message=message,
             stdout_tail=_tail_file(Path(entry["stdout_path"]), tail),
             stderr_tail=_tail_file(Path(entry["stderr_path"]), tail),
             stdout_path=_container_path(entry.get("stdout_path", ""), self.instance, self.config),
@@ -552,6 +563,7 @@ class JobManager:
         return JobResult(
             job_id=job_id,
             status=JobStatus.RUNNING,
+            message="job is still running",
             stdout_tail=_tail_file(stdout_path, tail),
             stderr_tail=_tail_file(stderr_path, tail),
             stdout_path=_container_path(str(stdout_path), self.instance, self.config),
@@ -637,9 +649,12 @@ class JobManager:
                 entry["finished_at"] = datetime.now(timezone.utc).isoformat()
                 entry["duration"] = round(self._duration_since_created(entry), 2)
                 self._save_jobs()
+                return_code = ec if ec is not None else -1
+                message = f"job failed with exit code {return_code}" if return_code != -1 else "job failed"
                 return JobResult(
                     job_id=job_id, status=JobStatus.FAILED,
-                    exit_code=ec if ec is not None else -1,
+                    exit_code=return_code,
+                    message=message,
                     stdout_tail=_tail_file(stdout_path, tail),
                     stderr_tail=_tail_file(stderr_path, tail),
                     stdout_path=_container_path(str(stdout_path), self.instance, self.config),
@@ -660,6 +675,7 @@ class JobManager:
                 return JobResult(
                     job_id=job_id, status=JobStatus.CANCELLED,
                     exit_code=ec if ec is not None else -1,
+                    message="job was cancelled",
                     stdout_tail=_tail_file(stdout_path, tail),
                     stderr_tail=_tail_file(stderr_path, tail),
                     stdout_path=_container_path(str(stdout_path), self.instance, self.config),
@@ -671,6 +687,7 @@ class JobManager:
                 # Job still in scheduler — return RUNNING, not UNKNOWN
                 return JobResult(
                     job_id=job_id, status=JobStatus.RUNNING,
+                    message="job is still running",
                     stdout_path=_container_path(str(stdout_path), self.instance, self.config),
                     stderr_path=_container_path(str(stderr_path), self.instance, self.config),
                     duration=self._duration_since_created(entry),
@@ -680,6 +697,7 @@ class JobManager:
                 # timeout=0 means just peek — return immediately
                 return JobResult(
                     job_id=job_id, status=JobStatus.RUNNING,
+                    message="job is still running",
                     stdout_path=_container_path(str(stdout_path), self.instance, self.config),
                     stderr_path=_container_path(str(stderr_path), self.instance, self.config),
                     duration=self._duration_since_created(entry),

@@ -8,6 +8,41 @@ import tomli
 
 logger = logging.getLogger("ns-hpc")
 
+# Memory suffix multipliers (for cgroup MemoryMax in bytes)
+_MEMORY_SUFFIXES: dict[str, int] = {
+    "K": 1024,
+    "M": 1024 ** 2,
+    "G": 1024 ** 3,
+    "T": 1024 ** 4,
+    "Ki": 1024,
+    "Mi": 1024 ** 2,
+    "Gi": 1024 ** 3,
+    "Ti": 1024 ** 4,
+}
+
+
+def parse_memory(value: str | int) -> int:
+    """Parse a memory string (e.g. ``"4G"``, ``"512M"``) into bytes.
+
+    Accepts suffixes: K, M, G, T, Ki, Mi, Gi, Ti (2^10 multipliers).
+    A bare integer is returned as-is.
+    """
+    if isinstance(value, int):
+        return value
+    value = value.strip()
+    if not value:
+        return 0
+    for suffix, multiplier in _MEMORY_SUFFIXES.items():
+        if value.endswith(suffix):
+            try:
+                return int(value[: -len(suffix)]) * multiplier
+            except ValueError:
+                raise ValueError(f"invalid memory value: {value!r}")
+    try:
+        return int(value)
+    except ValueError:
+        raise ValueError(f"invalid memory value: {value!r}")
+
 
 class NamespaceDefaults(BaseModel):
     bind_ro: list[str]
@@ -27,16 +62,38 @@ class ResourceDefaults(BaseModel):
     resource_patterns: list[str] = ["*.md"]
 
 
+class CpuLimit(BaseModel):
+    """Local cgroup CPU limit."""
+    limit: int = 4
+
+
+class MemoryLimit(BaseModel):
+    """Local cgroup memory limit."""
+    limit: str = "8G"
+
+
+class Resources(BaseModel):
+    """Local cgroup resource limits — fixed upper bounds."""
+    cpus: CpuLimit = CpuLimit()
+    memory: MemoryLimit = MemoryLimit()
+
+
+class SlurmResource(BaseModel):
+    """A single Slurm sbatch parameter definition."""
+    parameter: str  # e.g. "--cpus-per-task={}", "--gres=gpu:{}"
+    default: int | str
+    max: int | str
+
+
 class SlurmConfig(BaseModel):
     partition: str = "debug"
+    resources: dict[str, SlurmResource] = {
+        "cpus": SlurmResource(parameter="--cpus-per-task={}", default=1, max=8),
+        "memory": SlurmResource(parameter="--mem={}", default="4G", max="32G"),
+    }
     default_cpus: int = 1
     default_memory_gb: int = 4
     default_timeout: int = 3600
-
-
-class ResourceLimits(BaseModel):
-    local_timeout: int = 300
-    slurm_timeout: int = 86400
 
 
 class JobConfig(BaseModel):
@@ -48,8 +105,8 @@ class Config(BaseModel):
     namespace_defaults: NamespaceDefaults
     proxied_mcps: dict[str, ProxiedMCP]
     resource_defaults: ResourceDefaults
+    resources: Resources = Resources()
     slurm: SlurmConfig = SlurmConfig()
-    resource_limits: ResourceLimits = ResourceLimits()
     job: JobConfig = JobConfig()
     instances_dir: str = "${HOME}/mcp_instances"
 
@@ -69,8 +126,8 @@ def _default_config() -> Config:
             context_dirs=["config/context"],
             resource_patterns=["*.md"],
         ),
+        resources=Resources(),
         slurm=SlurmConfig(),
-        resource_limits=ResourceLimits(),
     )
 
 

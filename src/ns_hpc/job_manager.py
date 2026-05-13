@@ -205,6 +205,12 @@ class JobManager:
         p.mkdir(parents=True, exist_ok=True)
         return p
 
+    def _status_dir(self) -> Path:
+        """Directory for bwrap status files — outside workspace mount."""
+        p = self.instance.output_dir
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
     # ── Status file helpers ─────────────────────────────────────────────────
 
     @staticmethod
@@ -298,7 +304,7 @@ class JobManager:
         status_fd = self.config.namespace_defaults.status_fd
         stdout_path = output_dir / f"{job_id}.out"
         stderr_path = output_dir / f"{job_id}.err"
-        status_path = output_dir / f"{job_id}.status"
+        status_path = self._status_dir() / f"{job_id}.status"
 
         if mode == "local":
             self._submit_local(job_id, command, stdout_path, stderr_path, status_path)

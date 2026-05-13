@@ -759,7 +759,17 @@ class JobManager:
         return True
 
     def cancel_and_tail(self, result: JobResult, tail: int = 50) -> None:
-        """Cancel a running job and set status to CANCELLED with output tail."""
+        """Cancel a running job and set status to CANCELLED with output tail.
+
+        .. note::
+
+           Known issue: ``result.stdout_path`` at this point is a
+           *container-side* path (translated by ``_container_path``), but
+           ``_tail_file`` expects a *host-side* path.  The tail output will
+           therefore be empty after this call.  The proper fix is to integrate
+           the detach-flag into ``submit()`` / ``poll()`` where host-side
+           paths are available.  Deferred — see also `_save_jobs` TODO.
+        """
         self.cancel(result.job_id)
         result.stdout_tail = _tail_file(Path(result.stdout_path), tail)
         result.stderr_tail = _tail_file(Path(result.stderr_path), tail)

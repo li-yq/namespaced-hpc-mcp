@@ -125,3 +125,22 @@ class Instance:
         }
         with open(self.audit_log_path, "a") as f:
             f.write(json.dumps(entry) + "\n")
+
+    # ── Description ───────────────────────────────────────────────────────
+
+    def get_description(self) -> str:
+        """Read the instance description from metadata."""
+        try:
+            meta = json.loads(self.metadata_path.read_text())
+            return meta.get("description", "")
+        except (FileNotFoundError, json.JSONDecodeError):
+            return ""
+
+    def set_description(self, description: str) -> None:
+        """Update the instance description in metadata."""
+        try:
+            meta = json.loads(self.metadata_path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            meta = {}
+        meta["description"] = description
+        self.metadata_path.write_text(json.dumps(meta, indent=2))

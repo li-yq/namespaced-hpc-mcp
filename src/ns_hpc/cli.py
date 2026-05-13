@@ -128,6 +128,44 @@ def create(
 
 
 @instance_app.command()
+def describe(
+    instance_id: str = typer.Argument(help="Instance ID"),
+):
+    """Show instance metadata."""
+    cfg = load_config()
+    inst = Instance.load(instance_id, cfg)
+    if inst is None:
+        print(f"Error: instance '{instance_id}' not found.", file=sys.stderr)
+        raise typer.Exit(code=1)
+
+    meta = json.loads(inst.metadata_path.read_text())
+    print(f"ID:          {inst.id}")
+    print(f"Created at:  {meta.get('created_at', 'unknown')}")
+    print(f"Hostname:    {meta.get('hostname', 'unknown')}")
+    print(f"Description: {inst.get_description()}")
+    print(f"Workspace:   {inst.workspace_dir}")
+
+
+@instance_app.command()
+def update(
+    instance_id: str = typer.Argument(help="Instance ID"),
+    description: str = typer.Option("", "--description", "-d", help="New description"),
+):
+    """Update instance metadata."""
+    cfg = load_config()
+    inst = Instance.load(instance_id, cfg)
+    if inst is None:
+        print(f"Error: instance '{instance_id}' not found.", file=sys.stderr)
+        raise typer.Exit(code=1)
+
+    if description:
+        inst.set_description(description)
+
+    print(f"Updated instance '{instance_id}'.")
+    print(f"Description: {inst.get_description()}")
+
+
+@instance_app.command()
 def run(
     instance_id: str = typer.Argument(help="Instance ID"),
     command: list[str] = typer.Argument(help="Command and arguments"),

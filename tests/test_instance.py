@@ -112,3 +112,25 @@ def test_list_instances(tmp_path):
     ids = [i.id for i in instances]
     assert "list-a" in ids
     assert "list-b" in ids
+
+
+def test_get_set_description(tmp_path):
+    """get_description returns empty string when unset; set_description updates it."""
+    cfg = _config(str(tmp_path))
+    inst = Instance.create("test-desc", cfg)
+
+    # Default is empty
+    assert inst.get_description() == ""
+
+    # Set and verify
+    inst.set_description("my test instance")
+    assert inst.get_description() == "my test instance"
+
+    # Update
+    inst.set_description("updated description")
+    assert inst.get_description() == "updated description"
+
+    # Re-load from disk and verify persistence
+    loaded = Instance.load("test-desc", cfg)
+    assert loaded is not None
+    assert loaded.get_description() == "updated description"

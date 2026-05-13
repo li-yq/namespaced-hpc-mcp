@@ -166,6 +166,34 @@ async def destroy_instance(input: DestroyInstanceInput, ctx: Context) -> str:
     return f"Instance '{input.instance_id}' destroyed."
 
 
+class UpdateInstanceInput(BaseModel):
+    """Input for the update_instance tool."""
+    instance_id: str = Field(
+        ...,
+        description="ID of the instance to update",
+    )
+    description: str | None = Field(
+        default=None,
+        description="New description for the instance (omit to leave unchanged)",
+    )
+
+
+@mcp.tool()
+async def update_instance(input: UpdateInstanceInput, ctx: Context) -> str:
+    """Update an instance's metadata (e.g. description)."""
+    context: ServerContext = ctx.lifespan_context
+
+    instance = Instance.load(input.instance_id, context.config)
+    if instance is None:
+        raise ToolError(f"Instance '{input.instance_id}' not found")
+
+    if input.description is not None:
+        instance.set_description(input.description)
+
+    desc = instance.get_description()
+    return f"Instance '{input.instance_id}': description='{desc}'"
+
+
 # ── Job execution ─────────────────────────────────────────────────────────
 
 

@@ -23,7 +23,7 @@ def test_default_config_values():
     assert cfg.namespace_defaults.workspace_mount == "/workspace"
     assert "--share-net" in cfg.namespace_defaults.flags
     assert cfg.proxied_mcps == {}
-    assert cfg.resource_defaults.context_dirs == ["config/context"]
+    assert cfg.resource_defaults.context_dirs == ["context"]
     assert cfg.resource_defaults.resource_patterns == ["*.md"]
     assert cfg.slurm.partition == "debug"
     assert cfg.slurm.default_cpus == 1
@@ -124,8 +124,9 @@ max = 8
 
 
 def test_resolve_instances_dir():
-    """${HOME} in instances_dir is expanded to the real home directory."""
+    """instances_dir expands to ~/.local/share/ns-hpc/instances by default."""
     cfg = load_config("/nonexistent/config.toml")
     resolved = cfg.resolve_instances_dir()
-    home = Path.home().resolve()
-    assert str(resolved).startswith(str(home))
+    expected = Path.home() / ".local" / "share" / "ns-hpc" / "instances"
+    assert resolved == expected.resolve()
+    assert str(resolved).endswith("ns-hpc/instances")

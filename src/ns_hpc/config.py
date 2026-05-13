@@ -109,10 +109,11 @@ class Config(BaseModel):
     resources: Resources = Resources()
     slurm: SlurmConfig = SlurmConfig()
     job: JobConfig = JobConfig()
-    instances_dir: str = "${HOME}/mcp_instances"
+    instances_dir: str = "${HOME}/.local/share/ns-hpc/instances"
 
     def resolve_instances_dir(self) -> Path:
-        return Path(os.path.expandvars(os.path.expanduser(self.instances_dir))).resolve()
+        resolved = os.path.expandvars(os.path.expanduser(self.instances_dir))
+        return Path(resolved).resolve()
 
 
 def _default_config() -> Config:
@@ -124,7 +125,7 @@ def _default_config() -> Config:
         ),
         proxied_mcps={},
         resource_defaults=ResourceDefaults(
-            context_dirs=["config/context"],
+            context_dirs=["context"],
             resource_patterns=["*.md"],
         ),
         resources=Resources(),
@@ -182,7 +183,7 @@ def load_config(path: str | Path | None = None) -> Config:
 
     Layering (highest priority last):
       1. Built-in defaults (``_default_config()``)
-      2. ``~/.local/ns-hpc/config.toml`` (user-level overrides)
+      2. ``${XDG_CONFIG_HOME:-~/.config}/ns-hpc/config.toml`` (user-level overrides)
       3. Env-var or explicit ``path`` (highest priority)
 
     Dict values are merged recursively; lists are fully replaced by the
@@ -191,8 +192,8 @@ def load_config(path: str | Path | None = None) -> Config:
     # 1. Start with built-in defaults
     config_dict = _default_config().model_dump()
 
-    # 2. Apply user-level config
-    user_config = Path("~/.local/ns-hpc/config.toml").expanduser()
+    # 2. Apply user-level config (XDG_CONFIG_HOME)
+    user_config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "ns-hpc" / "config.toml"
     if user_config.exists():
         data = _load_toml(user_config)
         _warn_unknown_keys(data, Config)

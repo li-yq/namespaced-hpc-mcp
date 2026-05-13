@@ -65,6 +65,31 @@ def test_tail_file_empty():
         tmp.unlink()
 
 
+def test_tail_file_max_bytes():
+    """max_bytes limits how much of the file is read."""
+    tmp = Path(tempfile.mkstemp()[1])
+    try:
+        tmp.write_text("a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n")
+        # n=10 but max_bytes=5 — should return partial content
+        result = _tail_file(tmp, n=10, max_bytes=5)
+        assert len(result) > 0
+        assert len(result) <= 5
+    finally:
+        tmp.unlink()
+
+
+def test_tail_file_long_single_line():
+    """A single line longer than max_bytes returns truncated content."""
+    tmp = Path(tempfile.mkstemp()[1])
+    try:
+        tmp.write_text("x" * 2_000_000)
+        result = _tail_file(tmp, n=1, max_bytes=1024)
+        assert len(result) == 1024
+        assert result == "x" * 1024
+    finally:
+        tmp.unlink()
+
+
 def test_submit_and_complete(tmp_path, monkeypatch):
     """Submit a quick command, verify it completes."""
     cfg = _config(str(tmp_path), monkeypatch)

@@ -82,8 +82,8 @@ class JobResult:
         }
 
 
-def _tail_file(path: Path, n: int = 50) -> str:
-    """Read the last ``n`` lines of a file efficiently."""
+def _tail_file(path: Path, n: int = 50, max_bytes: int = 1048576) -> str:
+    """Read the last ``n`` lines of a file, reading at most ``max_bytes``."""
     if n <= 0 or not path.exists() or path.stat().st_size == 0:
         return ""
     try:
@@ -93,24 +93,11 @@ def _tail_file(path: Path, n: int = 50) -> str:
             if size == 0:
                 return ""
 
-            # Read backwards in chunks until we have n lines or hit the start
-            bufsize = min(size, 8192)
-            f.seek(max(0, size - bufsize))
-            data = f.read(bufsize)
+            read_size = min(size, max_bytes)
+            f.seek(size - read_size)
+            data = f.read(read_size)
 
             lines = data.decode(errors="replace").splitlines()
-            if len(lines) >= n:
-                return "\n".join(lines[-n:])
-
-            # Need to read more
-            remaining = size - bufsize
-            while remaining > 0 and len(lines) < n:
-                bufsize = min(remaining, 8192)
-                remaining -= bufsize
-                f.seek(max(0, remaining))
-                data = f.read(bufsize) + data
-                lines = data.decode(errors="replace").splitlines()
-
             return "\n".join(lines[-n:])
     except (OSError, UnicodeDecodeError):
         return ""

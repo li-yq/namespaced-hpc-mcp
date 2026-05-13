@@ -10,12 +10,24 @@ status_fd = 3
 context_dirs = ["context"]
 resource_patterns = ["*.md"]
 
+[resources.cpus]
+limit = 4
+
+[resources.memory]
+limit = "8G"
+
 [slurm]
 partition = "cpu"
 default_cpus = 1
 default_memory_gb = 4
 default_timeout = 3600
 
-[resource_limits]
-local_timeout = 300
-slurm_timeout = 86400
+[slurm.resources.cpus]
+parameter = "--cpus-per-task={}"
+default = 1
+max = 8
+
+[slurm.resources.memory]
+parameter = "--mem={}"
+default = "4G"
+max = "32G"

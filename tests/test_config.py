@@ -2,7 +2,17 @@ import os
 import tempfile
 from pathlib import Path
 
-from ns_hpc.config import Config, load_config
+from ns_hpc.config import Config, load_config, parse_memory
+
+
+def test_parse_memory():
+    """parse_memory converts human-readable strings to bytes."""
+    assert parse_memory("1K") == 1024
+    assert parse_memory("1M") == 1024 ** 2
+    assert parse_memory("1G") == 1024 ** 3
+    assert parse_memory("512M") == 512 * 1024 ** 2
+    assert parse_memory(4096) == 4096
+    assert parse_memory("4096") == 4096
 
 
 def test_default_config_values():
@@ -19,8 +29,12 @@ def test_default_config_values():
     assert cfg.slurm.default_cpus == 1
     assert cfg.slurm.default_memory_gb == 4
     assert cfg.slurm.default_timeout == 3600
-    assert cfg.resource_limits.local_timeout == 300
-    assert cfg.resource_limits.slurm_timeout == 86400
+    assert cfg.resources.cpus.limit == 4
+    assert cfg.resources.memory.limit == "8G"
+    assert cfg.slurm.resources["cpus"].default == 1
+    assert cfg.slurm.resources["cpus"].max == 8
+    assert cfg.slurm.resources["memory"].default == "4G"
+    assert cfg.slurm.resources["memory"].max == "32G"
 
 
 def test_config_fallback_nonexistent_returns_user_or_defaults():
@@ -49,14 +63,31 @@ env = {TOKEN = "sekret"}
 context_dirs = ["docs"]
 resource_patterns = ["*.rst", "*.txt"]
 
+[resources.cpus]
+limit = 8
+
+[resources.memory]
+limit = "16G"
+
 [slurm]
 partition = "gpu"
 default_cpus = 2
 default_memory_gb = 8
 
-[resource_limits]
-local_timeout = 600
-slurm_timeout = 43200
+[slurm.resources.cpus]
+parameter = "--cpus-per-task={}"
+default = 2
+max = 16
+
+[slurm.resources.memory]
+parameter = "--mem={}"
+default = "8G"
+max = "64G"
+
+[slurm.resources.gpus]
+parameter = "--gres=gpu:{}"
+default = 0
+max = 8
 """
     with tempfile.NamedTemporaryFile(mode="wb", suffix=".toml", delete=False) as f:
         f.write(toml_content.encode())
@@ -78,8 +109,16 @@ slurm_timeout = 43200
         assert cfg.slurm.partition == "gpu"
         assert cfg.slurm.default_cpus == 2
         assert cfg.slurm.default_memory_gb == 8
-        assert cfg.resource_limits.local_timeout == 600
-        assert cfg.resource_limits.slurm_timeout == 43200
+        assert cfg.resources.cpus.limit == 8
+        assert cfg.resources.memory.limit == "16G"
+        assert cfg.slurm.resources["cpus"].default == 2
+        assert cfg.slurm.resources["cpus"].max == 16
+        assert cfg.slurm.resources["cpus"].parameter == "--cpus-per-task={}"
+        assert cfg.slurm.resources["memory"].default == "8G"
+        assert cfg.slurm.resources["memory"].max == "64G"
+        assert cfg.slurm.resources["gpus"].default == 0
+        assert cfg.slurm.resources["gpus"].max == 8
+        assert cfg.slurm.resources["gpus"].parameter == "--gres=gpu:{}"
     finally:
         os.unlink(tmp)
 

@@ -50,10 +50,6 @@ partition = "cpu"
 default_cpus = 1
 default_memory_gb = 4
 default_timeout = 3600
-
-[resource_limits]
-local_timeout = 300
-slurm_timeout = 86400
 """
 
 # Produces ~10 lines over ~20s — great for tail and timing tests.
@@ -162,7 +158,7 @@ async def s_timeout_kill(log: SessionLog, mgr: JobManager) -> None:
     r = mgr.submit(_SEQ_CMD, timeout=3, tail=3)
     # Simulate the MCP layer's no-detach handling (cancel_and_tail)
     if r.status == JobStatus.RUNNING:
-        r = mgr.cancel_and_tail(r, tail=3)
+        mgr.cancel_and_tail(r, tail=3)
     log.log_result("submit seq timeout=3 (killed)", r)
     assert r.status == JobStatus.CANCELLED, f"expected CANCELLED, got {r.status}"
     assert r.exit_code is None

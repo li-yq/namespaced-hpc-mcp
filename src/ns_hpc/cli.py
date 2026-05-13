@@ -173,6 +173,10 @@ def run(
     slurm: bool = typer.Option(False, "--slurm", help="Submit via sbatch"),
     timeout: int = typer.Option(60, "--timeout", "-t", help="Max wait in seconds"),
     tail: int = typer.Option(50, "--tail", help="Tail lines to show"),
+    slurm_resource: list[str] = typer.Option(
+        [], "--slurm-resource", "-r",
+        help="Slurm resource (key=value), repeatable (e.g. -r cpus=4 -r memory=8G)",
+    ),
 ):
     """Run a command as an async job. Waits up to --timeout seconds.
 
@@ -189,12 +193,26 @@ def run(
     mgr = JobManager(inst, cfg)
     cmd_str = " ".join(command)
     mode_str = "slurm" if slurm else "local"
+
+    # Parse --slurm-resource key=value pairs into dict
+    parsed_resources: dict[str, int | str] = {}
+    for r in slurm_resource:
+        k, _, v = r.partition("=")
+        if not k or not v:
+            print(f"Error: invalid resource spec '{r}' (use key=value)", file=sys.stderr)
+            raise typer.Exit(code=1)
+        try:
+            parsed_resources[k] = int(v)
+        except ValueError:
+            parsed_resources[k] = v
+
     inst.audit("job.submitted", command=cmd_str, mode=mode_str, timeout=timeout)
     result = mgr.submit(
         cmd_str,
         mode=mode_str,
         timeout=timeout,
         tail=tail,
+        slurm_resources=parsed_resources or None,
     )
 
     # Handle detach

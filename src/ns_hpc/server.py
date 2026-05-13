@@ -220,6 +220,10 @@ class SubmitJobInput(BaseModel):
         ge=0,
         le=1000,
     )
+    slurm_resources: dict[str, int | str] | None = Field(
+        default=None,
+        description="Per-job resource overrides for Slurm (e.g. {'cpus': 4})",
+    )
 
 
 @mcp.tool()
@@ -250,6 +254,7 @@ async def submit_job(input: SubmitJobInput, ctx: Context) -> dict:
         mode=input.mode,
         timeout=input.timeout,
         tail=input.tail,
+        slurm_resources=input.slurm_resources,
     )
 
     # Handle detach: if still running after timeout, keep it running

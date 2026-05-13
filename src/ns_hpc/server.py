@@ -7,16 +7,19 @@ import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from fastmcp import FastMCP, Context
 from fastmcp.exceptions import ToolError
 from fastmcp.resources import FileResource
+from fastmcp.tools import FunctionTool
+from mcp.types import TextContent
 from pydantic import BaseModel, Field
 
-from ns_hpc.config import Config, load_config
+from ns_hpc.config import Config, ProxiedMCP, load_config
 from ns_hpc.instance import Instance
 from ns_hpc.job_manager import JobManager, JobStatus
+from ns_hpc.proxy import ProxyManager, discover_tools
 
 
 def _probe_systemd() -> bool:
@@ -42,6 +45,7 @@ class ServerContext:
     config_path: str | None = None
     job_managers: dict[str, JobManager] = field(default_factory=dict)
     systemd_available: bool = False
+    proxy_manager: ProxyManager = field(default_factory=ProxyManager)
 
 
 def _get_manager(ctx: Context, instance: Instance) -> JobManager:
@@ -83,6 +87,62 @@ def _register_context_resources(server: FastMCP, config: Config, config_path: st
                     break
 
 
+def _make_proxy_handler(
+    pm: ProxyManager, proxy_name: str, cfg: ProxiedMCP, remote_name: str,
+) -> Any:
+    """Create a **kwargs handler that routes to the proxied MCP inside an instance."""
+    async def handler(**kwargs: Any) -> str:
+        instance_id = kwargs.pop("instance_id")
+        client = pm.get_or_start(proxy_name, instance_id, cfg)
+        await client.ensure_connected()
+        result = await client.call_tool(remote_name, kwargs)
+        texts = [
+            c.text for c in (result.content or [])
+            if isinstance(c, TextContent)
+        ]
+        return "\n".join(texts) if texts else str(result)
+    return handler
+
+
+def _register_proxied_tools(server: FastMCP, config: Config) -> ProxyManager:
+    """Discover tools from each proxied MCP and register wrapped FunctionTools."""
+    pm = ProxyManager()
+
+    for proxy_name, proxy_cfg in config.proxied_mcps.items():
+        import asyncio
+        remote_tools = asyncio.run(discover_tools(proxy_cfg))
+        if not remote_tools:
+            logger = __import__("logging").getLogger("ns-hpc")
+            logger.warning("no tools discovered for proxied MCP %r, skipping", proxy_name)
+            continue
+
+        for remote_tool in remote_tools:
+            orig_props = dict(remote_tool.inputSchema.get("properties", {}))
+            orig_required = list(remote_tool.inputSchema.get("required", []))
+
+            combined_schema = {
+                "type": "object",
+                "properties": {
+                    "instance_id": {"type": "string", "description": "Instance ID"},
+                    **orig_props,
+                },
+                "required": ["instance_id"] + orig_required,
+            }
+
+            tool_name = f"{proxy_name}__{remote_tool.name}"
+            handler = _make_proxy_handler(pm, proxy_name, proxy_cfg, remote_tool.name)
+
+            ft = FunctionTool(
+                fn=handler,
+                name=tool_name,
+                description=remote_tool.description or "",
+                parameters=combined_schema,
+            )
+            server.add_tool(ft)
+
+    return pm
+
+
 @asynccontextmanager
 async def server_lifespan(server: FastMCP) -> AsyncIterator[ServerContext]:
     """Initialize server context and register context resources."""
@@ -91,9 +151,14 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[ServerContext]:
     systemd_available = _probe_systemd()
 
     _register_context_resources(server, config, config_path)
+    proxy_manager = _register_proxied_tools(server, config)
 
     try:
-        yield ServerContext(config=config, config_path=config_path, systemd_available=systemd_available)
+        yield ServerContext(
+            config=config, config_path=config_path,
+            systemd_available=systemd_available,
+            proxy_manager=proxy_manager,
+        )
     finally:
         pass
 
@@ -180,6 +245,7 @@ async def destroy_instance(input: DestroyInstanceInput, ctx: Context) -> str:
         raise ToolError(f"Instance '{input.instance_id}' not found")
 
     context.job_managers.pop(input.instance_id, None)
+    await context.proxy_manager.stop_all(input.instance_id)
     Instance.destroy(input.instance_id, context.config)
     return f"Instance '{input.instance_id}' destroyed."
 

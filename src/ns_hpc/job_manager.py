@@ -75,6 +75,9 @@ class JobResult:
             "exit_code": self.exit_code,
             "stdout_tail": self.stdout_tail,
             "stderr_tail": self.stderr_tail,
+            "stdout_path": self.stdout_path,
+            "stderr_path": self.stderr_path,
+            "duration": round(self.duration, 2),
         }
 
 
@@ -550,7 +553,7 @@ class JobManager:
         stderr_path: Path = Path(entry["stderr_path"])
 
         if slurm_job_id is None:
-            raise ValueError("slurm job has no slurm_job_id — bug: entry was submitted without one")
+            raise ValueError("job has no slurm_job_id — missing slurm identifier")
 
         deadline = time.monotonic() + timeout if timeout > 0 else None
 

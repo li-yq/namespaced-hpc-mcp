@@ -104,13 +104,12 @@ def _make_proxy_handler(
     return handler
 
 
-def _register_proxied_tools(server: FastMCP, config: Config) -> ProxyManager:
+async def _register_proxied_tools(server: FastMCP, config: Config) -> ProxyManager:
     """Discover tools from each proxied MCP and register wrapped FunctionTools."""
     pm = ProxyManager()
 
     for proxy_name, proxy_cfg in config.proxied_mcps.items():
-        import asyncio
-        remote_tools = asyncio.run(discover_tools(proxy_cfg))
+        remote_tools = await discover_tools(proxy_cfg)
         if not remote_tools:
             logger = __import__("logging").getLogger("ns-hpc")
             logger.warning("no tools discovered for proxied MCP %r, skipping", proxy_name)
@@ -151,7 +150,7 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[ServerContext]:
     systemd_available = _probe_systemd()
 
     _register_context_resources(server, config, config_path)
-    proxy_manager = _register_proxied_tools(server, config)
+    proxy_manager = await _register_proxied_tools(server, config)
 
     try:
         yield ServerContext(

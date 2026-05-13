@@ -331,6 +331,118 @@ async def s_slurm_status_file(log: SessionLog, mgr: JobManager,
         log.fail("status file", f"not found at {sf}")
 
 
+# ── Recovery from disk (simulate server restart) ──────────────────────────
+
+
+async def s_recovery_completed(log: SessionLog, inst: Instance, cfg: Config) -> None:
+    """Submit quick job via mgr1, create mgr2, verify COMPLETED loaded from disk."""
+    log.subheading("Recovery — completed job survives server restart")
+    mgr1 = JobManager(inst, cfg)
+    r = mgr1.submit("echo recovery_check", timeout=10)
+    log.log_result("mgr1 submit echo", r)
+    assert r.status == JobStatus.COMPLETED
+    job_id = r.job_id
+
+    # Simulate server restart — new JobManager reads from disk
+    mgr2 = JobManager(inst, cfg)
+    r2 = mgr2.poll(job_id, timeout=0, tail=5)
+    assert r2 is not None
+    log.log_result("mgr2 poll (after restart)", r2)
+    assert r2.status == JobStatus.COMPLETED, f"expected COMPLETED, got {r2.status}"
+    assert r2.exit_code == 0
+    assert "recovery_check" in r2.stdout_tail
+
+
+async def s_recovery_running_then_completed(log: SessionLog, inst: Instance, cfg: Config) -> None:
+    """Submit seq loop via mgr1, let it finish, create mgr2, verify status file detects completion."""
+    log.subheading("Recovery — job finishes while server is down, status file recovery")
+    mgr1 = JobManager(inst, cfg)
+    r = mgr1.submit(_SEQ_CMD, timeout=3, tail=3)
+    log.log_result("mgr1 submit seq (detach)", r)
+    assert r.status == JobStatus.RUNNING
+    job_id = r.job_id
+
+    # Wait for the seq loop to finish naturally (~20s total, waited 3s already)
+    r_final = mgr1.poll(job_id, timeout=30, tail=5)
+    assert r_final is not None and r_final.status == JobStatus.COMPLETED
+    log.log_result("job finished before restart", r_final)
+
+    # Simulate server restart — new mgr should detect COMPLETED via status file
+    mgr2 = JobManager(inst, cfg)
+    r2 = mgr2.poll(job_id, timeout=0, tail=5)
+    assert r2 is not None
+    log.log_result("mgr2 poll (after restart)", r2)
+    assert r2.status == JobStatus.COMPLETED, f"expected COMPLETED, got {r2.status}"
+    assert r2.exit_code == 0
+    assert len(r2.stdout_tail) > 0
+
+
+async def s_recovery_cancelled(log: SessionLog, inst: Instance, cfg: Config) -> None:
+    """Submit + cancel via mgr1, create mgr2, verify CANCELLED loaded from disk."""
+    log.subheading("Recovery — cancelled job survives server restart")
+    mgr1 = JobManager(inst, cfg)
+    r = mgr1.submit("sleep 30", timeout=2, tail=3)
+    assert r.status == JobStatus.RUNNING
+    mgr1.cancel(r.job_id)
+    log.ok("mgr1 submit + cancel", f"job={r.job_id}")
+
+    # Simulate server restart
+    mgr2 = JobManager(inst, cfg)
+    r2 = mgr2.poll(r.job_id, timeout=0, tail=3)
+    assert r2 is not None
+    log.log_result("mgr2 poll cancelled (after restart)", r2)
+    assert r2.status == JobStatus.CANCELLED, f"expected CANCELLED, got {r2.status}"
+
+
+async def s_recovery_list_across_restart(log: SessionLog, inst: Instance, cfg: Config) -> None:
+    """Submit two jobs via mgr1, restart, mgr2.list_jobs() sees both."""
+    log.subheading("Recovery — list_jobs after restart")
+    mgr1 = JobManager(inst, cfg)
+    r1 = mgr1.submit("echo job_a", timeout=10)
+    r2 = mgr1.submit("echo job_b", timeout=10)
+    log.ok("mgr1 submitted two jobs", f"{r1.job_id}, {r2.job_id}")
+
+    mgr2 = JobManager(inst, cfg)
+    jobs = mgr2.list_jobs()
+    ids = [j["job_id"] for j in jobs]
+    assert r1.job_id in ids
+    assert r2.job_id in ids
+    log.ok("mgr2 list_jobs after restart", json.dumps(jobs, indent=2))
+
+
+async def s_slurm_recovery_completed(log: SessionLog, inst: Instance, cfg: Config) -> None:
+    """Submit slurm job via mgr1, restart, mgr2 loads COMPLETED from disk."""
+    log.subheading("Slurm recovery — completed job survives restart")
+    mgr1 = JobManager(inst, cfg)
+    r = mgr1.submit("echo slurm_recovery", mode="slurm", timeout=30)
+    log.log_result("mgr1 submit slurm", r)
+    assert r.status == JobStatus.COMPLETED
+
+    mgr2 = JobManager(inst, cfg)
+    r2 = mgr2.poll(r.job_id, timeout=0, tail=5)
+    assert r2 is not None
+    log.log_result("mgr2 poll slurm (after restart)", r2)
+    assert r2.status == JobStatus.COMPLETED
+
+
+async def s_slurm_recovery_running(log: SessionLog, inst: Instance, cfg: Config) -> None:
+    """Submit slurm detach via mgr1, restart, mgr2 sees RUNNING and waits for completion."""
+    log.subheading("Slurm recovery — running job survives restart, poll waits for completion")
+    mgr1 = JobManager(inst, cfg)
+    r = mgr1.submit(_SEQ_CMD, mode="slurm", timeout=5, tail=3)
+    log.log_result("mgr1 submit slurm seq (detach)", r)
+    assert r.status == JobStatus.RUNNING
+
+    # Simulate server restart — mgr2 picks up the running job
+    mgr2 = JobManager(inst, cfg)
+    # _fixup_stale_jobs runs in __init__, but it only reconciles "local" mode
+    # For slurm, the job entry stays "running" and mgr2 can poll sacct
+    r2 = mgr2.poll(r.job_id, timeout=30, tail=5)
+    assert r2 is not None
+    log.log_result("mgr2 poll slurm (after restart)", r2)
+    assert r2.status == JobStatus.COMPLETED, f"expected COMPLETED, got {r2.status}"
+
+
 # ── Orchestrator ────────────────────────────────────────────────────────────
 
 
@@ -355,6 +467,12 @@ async def run_local(log: SessionLog, inst: Instance, cfg: Config) -> None:
     await s_cancel_finished(log, mgr, finished)
     await s_list_jobs(log, mgr)
 
+    # Recovery from disk (simulate server restart)
+    await s_recovery_completed(log, inst, cfg)
+    await s_recovery_running_then_completed(log, inst, cfg)
+    await s_recovery_cancelled(log, inst, cfg)
+    await s_recovery_list_across_restart(log, inst, cfg)
+
     # Final cleanup — make sure no runaway processes
     for jid in list(mgr._procs):
         p = mgr._procs[jid]
@@ -377,6 +495,10 @@ async def run_slurm(log: SessionLog, inst: Instance, cfg: Config) -> None:
     running = await s_slurm_detach(log, mgr)
     await s_slurm_poll(log, mgr, running)
     await s_slurm_cancel(log, mgr, running)
+
+    # Slurm recovery from disk
+    await s_slurm_recovery_completed(log, inst, cfg)
+    await s_slurm_recovery_running(log, inst, cfg)
 
 
 async def run_resources(log: SessionLog) -> None:

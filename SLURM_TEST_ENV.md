@@ -141,3 +141,26 @@ podman-compose down
 podman volume rm -f slurm_slurm_etc_munge slurm_slurm_etc_slurm \
   slurm_slurm_var_log_slurm slurm_slurm_var_lib_mysql
 ```
+
+## Test Requirements
+
+Different tests require different environments:
+
+| Tests | Requirements | Command |
+|-------|-------------|---------|
+| `test_config.py`, `test_instance.py`, `test_namespace.py`, `test_proxy.py`, `test_server.py` | Pure unit — no special setup | `uv run pytest tests/ -v` |
+| `test_job_manager.py` | bwrap + user namespaces on host | `uv run pytest tests/test_job_manager.py -v` |
+| `test_bwrap_primitive.py` | bwrap + user namespaces on host | `uv run pytest tests/test_bwrap_primitive.py -v` |
+| `session_test.py` (local scenarios) | bwrap + user namespaces on host | `uv run python tests/session_test.py` |
+| `session_test.py` (slurm scenarios) | Podman Slurm cluster | `bash slurm/test_session.sh` |
+| cgroup resource tests | cgroup v2 + systemd on host | Requires `systemd-run --user --scope` |
+
+**Quick local-only test run:**
+```bash
+uv run pytest tests/test_config.py tests/test_instance.py tests/test_namespace.py tests/test_proxy.py tests/test_server.py tests/test_bwrap_primitive.py tests/test_job_manager.py -v
+```
+
+**Full integration (inside slurm cluster):**
+```bash
+bash slurm/test_session.sh
+```

@@ -58,8 +58,7 @@ def _default_config() -> Config:
         namespace_defaults=NamespaceDefaults(
             bind_ro=["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"],
             workspace_mount="/workspace",
-            flags=["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-                    "--die-with-parent"],
+            flags=["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"],
         ),
         proxied_mcps={},
         resource_defaults=ResourceDefaults(

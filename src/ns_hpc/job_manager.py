@@ -332,9 +332,12 @@ class JobManager:
         """Start a local bwrap job and persist its entry.  Does not wait."""
         status_fd = self.config.namespace_defaults.status_fd
 
-        # sh -c '<python> -m ns_hpc bwrap <id> -- ... ><out> 2><err> <n>><status>'
+        # exec so the outer bwrap reuses proc.pid (comm="bwrap"), making
+        # _is_bwrap_alive work and --die-with-parent cascade reliably:
+        #   sh -c exec python ... bwrap → os.execvp → bwrap (outer, proc.pid)
+        #                                                   └─ bwrap (inner, child-pid)
         shell_cmd = (
-            f"{sys.executable} -m ns_hpc bwrap {self.instance.id}"
+            f"exec {sys.executable} -m ns_hpc bwrap {self.instance.id}"
             f" -- "
             f"/bin/sh -c {shlex.quote(command)}"
             f" >{shlex.quote(str(stdout_path))} 2>{shlex.quote(str(stderr_path))}"
@@ -465,8 +468,19 @@ class JobManager:
             except subprocess.TimeoutExpired:
                 pass
 
-        # Read the status file — bwrap writes exit-code when done
-        finished, exit_code, _ = self._read_status_file(status_path)
+        # Recovery path: no process handle (server restart) — poll status file
+        if timeout > 0 and proc is None:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                finished, exit_code, _ = self._read_status_file(status_path)
+                if finished:
+                    break
+                time.sleep(0.2)
+            if not finished:
+                finished, exit_code, _ = self._read_status_file(status_path)
+        else:
+            # Normal path: read the status file once
+            finished, exit_code, _ = self._read_status_file(status_path)
 
         if not finished and proc and proc.poll() is not None:
             # Process gone but status file didn't flush — use proc returncode

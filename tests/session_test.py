@@ -37,7 +37,7 @@ instances_dir = "{instances_dir}"
 bind_ro = ["/usr", "/bin", "/lib", "/lib64"]
 workspace_mount = "/workspace"
 flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev",
-         "--tmpfs", "/tmp", "--die-with-parent"]
+         "--tmpfs", "/tmp"]
 
 [proxied_mcps]
 
@@ -377,6 +377,32 @@ async def s_recovery_running_then_completed(log: SessionLog, inst: Instance, cfg
     assert len(r2.stdout_tail) > 0
 
 
+async def s_recovery_running_still_alive(log: SessionLog, inst: Instance, cfg: Config) -> None:
+    """Job still running when server restarts — /proc liveness check keeps it RUNNING."""
+    log.subheading("Recovery — job still running after restart")
+    mgr1 = JobManager(inst, cfg)
+    r = mgr1.submit(_SEQ_CMD, timeout=2, tail=3)
+    log.log_result("mgr1 submit seq (detach)", r)
+    assert r.status == JobStatus.RUNNING
+
+    # With exec in shell_cmd, proc.pid is the outer bwrap (comm="bwrap"),
+    # so _is_bwrap_alive finds it alive and keeps the job RUNNING.
+    mgr2 = JobManager(inst, cfg)
+    r2 = mgr2.poll(r.job_id, timeout=0, tail=3)
+    assert r2 is not None
+    log.log_result("mgr2 poll (still running after restart)", r2)
+    assert r2.status == JobStatus.RUNNING, f"expected RUNNING, got {r2.status}"
+    r3 = mgr2.poll(r.job_id, timeout=30, tail=5)
+    assert r3 is not None
+    log.log_result("mgr2 poll (after completion)", r3)
+    assert r3.status == JobStatus.COMPLETED
+    assert r3.exit_code == 0
+
+    # Cleanup — cancel the original mgr1 job so it doesn't linger
+    if r.status == JobStatus.RUNNING:
+        mgr1.cancel(r.job_id)
+
+
 async def s_recovery_cancelled(log: SessionLog, inst: Instance, cfg: Config) -> None:
     """Submit + cancel via mgr1, create mgr2, verify CANCELLED loaded from disk."""
     log.subheading("Recovery — cancelled job survives server restart")
@@ -469,6 +495,7 @@ async def run_local(log: SessionLog, inst: Instance, cfg: Config) -> None:
 
     # Recovery from disk (simulate server restart)
     await s_recovery_completed(log, inst, cfg)
+    await s_recovery_running_still_alive(log, inst, cfg)
     await s_recovery_running_then_completed(log, inst, cfg)
     await s_recovery_cancelled(log, inst, cfg)
     await s_recovery_list_across_restart(log, inst, cfg)

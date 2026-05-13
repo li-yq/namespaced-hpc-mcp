@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from typing import Any
 
@@ -62,6 +63,14 @@ class ProxiedMCPClient:
         """Start the process inside bwrap and connect if not already connected."""
         if self._client is not None:
             return self._client
+
+        # Validate instance_id is a safe filesystem identifier
+        if not re.match(r"^[a-zA-Z0-9_.-]+$", self.instance_id):
+            raise ValueError(
+                f"Invalid instance_id {self.instance_id!r}: must match [a-zA-Z0-9_.-]+"
+            )
+        if not self.cfg.command or "\0" in self.cfg.command:
+            raise ValueError(f"Invalid proxied MCP command {self.cfg.command!r}")
 
         cmd = _build_bwrap_cmd(self.instance_id, self.cfg.command, self.cfg.args)
         transport = StdioTransport(

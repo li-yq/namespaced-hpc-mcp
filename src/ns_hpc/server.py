@@ -73,10 +73,13 @@ def _register_context_resources(server: FastMCP, config: Config, config_path: st
 
 def _make_proxy_handler(
     pm: ProxyManager, proxy_name: str, cfg: ProxiedMCP, remote_name: str,
+    config: Config,
 ) -> Callable[..., Awaitable[str]]:
     """Create a **kwargs handler that routes to the proxied MCP inside an instance."""
     async def handler(**kwargs: Any) -> str:
         instance_id = kwargs.pop("instance_id")
+        if not Instance.load(instance_id, config):
+            raise ToolError(f"Instance '{instance_id}' not found")
         client = pm.get_or_start(proxy_name, instance_id, cfg)
         await client.ensure_connected()
         result = await client.call_tool(remote_name, kwargs)
@@ -113,7 +116,7 @@ async def _register_proxied_tools(server: FastMCP, config: Config) -> ProxyManag
             }
 
             tool_name = f"{proxy_name}__{remote_tool.name}"
-            handler = _make_proxy_handler(pm, proxy_name, proxy_cfg, remote_tool.name)
+            handler = _make_proxy_handler(pm, proxy_name, proxy_cfg, remote_tool.name, config)
 
             ft = FunctionTool(
                 fn=handler,

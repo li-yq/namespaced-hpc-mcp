@@ -1,8 +1,12 @@
+import logging
 import os
 from pathlib import Path
 
 from pydantic import BaseModel
 import tomli
+
+
+logger = logging.getLogger("ns-hpc")
 
 
 class NamespaceDefaults(BaseModel):
@@ -70,24 +74,60 @@ def _default_config() -> Config:
     )
 
 
+def _load_toml(path: Path) -> dict:
+    """Load a TOML file and return the raw dict. Returns {} on error."""
+    try:
+        raw = path.read_bytes()
+        return tomli.loads(raw.decode())
+    except (FileNotFoundError, tomli.TOMLDecodeError, OSError) as e:
+        logger.warning("failed to load config %s: %s", path, e)
+        return {}
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge ``override`` into ``base``.
+
+    Dict values are merged recursively; all other values (including lists)
+    are replaced by the override.  Returns a new dict, does not modify inputs.
+    """
+    result = dict(base)
+    for k, v in override.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
 def load_config(path: str | Path | None = None) -> Config:
-    # 1. Use provided path or NS_HPC_CONFIG env var
+    """Load configuration by merging multiple layers.
+
+    Layering (highest priority last):
+      1. Built-in defaults (``_default_config()``)
+      2. ``~/.local/ns-hpc/config.toml`` (user-level overrides)
+      3. Env-var or explicit ``path`` (highest priority)
+
+    Dict values are merged recursively; lists are fully replaced by the
+    higher-priority layer.
+    """
+    # 1. Start with built-in defaults
+    config_dict = _default_config().model_dump()
+
+    # 2. Apply user-level config
+    user_config = Path("~/.local/ns-hpc/config.toml").expanduser()
+    if user_config.exists():
+        data = _load_toml(user_config)
+        config_dict = _deep_merge(config_dict, data)
+
+    # 3. Apply env-var or explicit path
     if path is None:
         path = os.environ.get("NS_HPC_CONFIG")
-
     if path is not None:
         p = Path(path)
         if p.exists():
-            raw = p.read_bytes()
-            data = tomli.loads(raw.decode())
-            return Config.model_validate(data)
+            data = _load_toml(p)
+            config_dict = _deep_merge(config_dict, data)
+        else:
+            logger.warning("config path %s not found, skipping", p)
 
-    # 2. Fallback to user-level config
-    user_config = Path("~/.local/ns-hpc/config.toml").expanduser()
-    if user_config.exists():
-        raw = user_config.read_bytes()
-        data = tomli.loads(raw.decode())
-        return Config.model_validate(data)
-
-    # 3. Built-in defaults
-    return _default_config()
+    return Config.model_validate(config_dict)

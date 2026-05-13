@@ -176,13 +176,8 @@ def run(
     print(f"Job {result.job_id}: {result.status.value}")
     if result.exit_code is not None:
         print(f"Exit code: {result.exit_code}")
-    if result.stdout_tail:
-        print("--- stdout ---")
-        sys.stdout.write(result.stdout_tail)
-    if result.stderr_tail:
-        print("--- stderr ---")
-        sys.stderr.write(result.stderr_tail)
-    print(f"---\nstdout: {result.stdout_path}\nstderr: {result.stderr_path}")
+    print(f"stdout: {result.stdout_path}")
+    print(f"stderr: {result.stderr_path}")
 
     if result.status in ("failed", "timeout"):
         raise typer.Exit(code=result.exit_code or 1)
@@ -226,12 +221,8 @@ def status(
     print(f"Job {result.job_id}: {result.status.value}")
     if result.exit_code is not None:
         print(f"Exit code: {result.exit_code}")
-    if result.stdout_tail:
-        print("--- stdout ---")
-        sys.stdout.write(result.stdout_tail)
-    if result.stderr_tail:
-        print("--- stderr ---")
-        sys.stderr.write(result.stderr_tail)
+    print(f"stdout: {result.stdout_path}")
+    print(f"stderr: {result.stderr_path}")
 
 
 @instance_app.command()
@@ -270,7 +261,11 @@ def cancel(
     ok = mgr.cancel(job_id)
     if ok:
         inst.audit("job.cancelled", job_id=job_id)
-        print(f"Cancelled job {job_id}.")
+        result = mgr.poll(job_id, tail=0)
+        print(f"Job {job_id}: cancelled")
+        if result:
+            print(f"stdout: {result.stdout_path}")
+            print(f"stderr: {result.stderr_path}")
     else:
         print(f"Job '{job_id}' not found.")
 

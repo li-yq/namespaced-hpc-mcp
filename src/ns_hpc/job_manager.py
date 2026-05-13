@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -19,7 +20,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from ns_hpc.config import Config
+from ns_hpc.config import Config, parse_memory
 from ns_hpc.instance import Instance
 
 
@@ -291,11 +292,20 @@ class JobManager:
         mode: str = "local",
         timeout: float = 60,
         tail: int = 50,
+        slurm_resources: dict[str, int | str] | None = None,
     ) -> JobResult:
         """Submit a job, then poll up to ``timeout`` seconds.
 
         Creates the job via ``_submit_local`` or ``_submit_slurm``,
         then delegates to ``poll()`` so the wait logic is shared.
+
+        Args:
+            command: Shell command to run.
+            mode: ``"local"`` (bwrap) or ``"slurm"`` (sbatch).
+            timeout: Max seconds to wait for completion.
+            tail: Number of tail lines to return.
+            slurm_resources: Per-job resource overrides for Slurm
+                (e.g. ``{"cpus": 4, "memory": "8G"}``).
         """
         if not command.strip():
             raise ValueError("command must not be empty")
@@ -309,7 +319,7 @@ class JobManager:
         if mode == "local":
             self._submit_local(job_id, command, stdout_path, stderr_path, status_path)
         elif mode == "slurm":
-            self._submit_slurm(job_id, command, stdout_path, stderr_path, status_path)
+            self._submit_slurm(job_id, command, stdout_path, stderr_path, status_path, slurm_resources)
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
@@ -338,7 +348,20 @@ class JobManager:
             f" {status_fd}>{shlex.quote(str(status_path))}"
         )
 
-        proc = subprocess.Popen(["sh", "-c", shell_cmd])
+        # Wrap with systemd-run for cgroup v2 resource limits (best-effort)
+        systemd = shutil.which("systemd-run")
+        if systemd:
+            cpus = self.config.resources.cpus.limit
+            memory = parse_memory(self.config.resources.memory.limit)
+            runner = [
+                systemd, "--user", "--scope",
+                "-p", f"CPUQuota={cpus * 100}%",
+                "-p", f"MemoryMax={memory}",
+                "--", "sh", "-c",
+            ]
+            proc = subprocess.Popen(runner + [shell_cmd])
+        else:
+            proc = subprocess.Popen(["sh", "-c", shell_cmd])
 
         self._jobs[job_id] = {
             "command": command,
@@ -361,6 +384,7 @@ class JobManager:
         stdout_path: Path,
         stderr_path: Path,
         status_path: Path,
+        slurm_resources: dict[str, int | str] | None = None,
     ) -> None:
         """Submit via sbatch and persist the entry.  Does not wait."""
         status_fd = self.config.namespace_defaults.status_fd
@@ -370,16 +394,23 @@ class JobManager:
             f" {status_fd}>{shlex.quote(str(status_path))}"
         )
 
+        # Build sbatch args with configured resource flags
+        sbatch_args = [
+            "sbatch",
+            "--wrap", bwrap_cmd,
+            "--output", str(stdout_path),
+            "--error", str(stderr_path),
+            "--job-name", f"ns-hpc-{job_id[:8]}",
+            "--partition", self.config.slurm.partition,
+        ]
+        for name, spec in self.config.slurm.resources.items():
+            value = (slurm_resources or {}).get(name, spec.default)
+            if value:
+                sbatch_args.append(spec.parameter.format(value))
+
         try:
             result = subprocess.run(
-                [
-                    "sbatch",
-                    "--wrap", bwrap_cmd,
-                    "--output", str(stdout_path),
-                    "--error", str(stderr_path),
-                    "--job-name", f"ns-hpc-{job_id[:8]}",
-                    "--partition", self.config.slurm.partition,
-                ],
+                sbatch_args,
                 capture_output=True, text=True, timeout=30,
             )
         except FileNotFoundError:

@@ -320,7 +320,7 @@ async def s_slurm_cancel(log: SessionLog, mgr: JobManager, running: JobResult) -
 async def s_slurm_status_file(log: SessionLog, mgr: JobManager,
                                inst: Instance, quick: JobResult) -> None:
     log.subheading("Slurm status file on compute node")
-    sf = inst.workspace_dir / ".ns_hpc_output" / f"{quick.job_id}.status"
+    sf = inst.base_dir / "status" / f"{quick.job_id}.status"
     if sf.exists():
         raw = sf.read_text()
         has_pid = '"child-pid"' in raw

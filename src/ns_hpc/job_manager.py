@@ -621,6 +621,15 @@ class JobManager:
                     duration=self._duration_since_created(entry),
                 )
 
+            if deadline is None:
+                # timeout=0 means just peek — return immediately
+                return JobResult(
+                    job_id=job_id, status=JobStatus.RUNNING,
+                    stdout_path=_container_path(str(stdout_path), self.instance, self.config),
+                    stderr_path=_container_path(str(stderr_path), self.instance, self.config),
+                    duration=self._duration_since_created(entry),
+                )
+
             time.sleep(2)
 
     def cancel(self, job_id: str) -> bool:

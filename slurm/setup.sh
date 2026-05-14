@@ -68,7 +68,13 @@ podman exec --user testuser -w /home/testuser slurm-slurmctld \
 podman exec slurm-slurmctld ln -sf "$VENV/bin/ns-hpc" "$NS_HPC_BIN"
 podman exec slurm-cpu-worker ln -sf "$VENV/bin/ns-hpc" "$NS_HPC_BIN"
 
-# ── 5. Create config.toml ─────────────────────────────────────────────────
+# ── 5. Install filesystem MCP proxy ──────────────────────────────────────
+echo "=== Installing filesystem MCP ==="
+# Pre-install globally so npx doesn't download on every discovery.
+podman exec slurm-slurmctld \
+    npm install -g @modelcontextprotocol/server-filesystem --quiet 2>/dev/null || true
+
+# ── 6. Create config.toml ─────────────────────────────────────────────────
 echo "=== Creating config ==="
 podman exec --user testuser -w /home/testuser slurm-slurmctld \
     mkdir -p "$HPC_HOME" "$HPC_HOME/context"
@@ -83,8 +89,12 @@ cat > "$TMP_CONFIG" <<'TOML'
 bind_ro = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]
 workspace_mount = "/workspace"
 flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+output_mount = "/output"
+status_fd = 3
 
-[proxied_mcps]
+[proxied_mcps.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/"]
 
 [resource_defaults]
 context_dirs = ["~/.local/ns-hpc/context"]
@@ -96,17 +106,13 @@ default_cpus = 1
 default_memory_gb = 4
 default_timeout = 3600
 
-[resource_limits]
-local_timeout = 300
-slurm_timeout = 86400
-
-instances_dir = "/home/testuser/mcp_instances"
+instances_dir = "/home/testuser/.local/share/ns-hpc/instances"
 TOML
 podman cp "$TMP_CONFIG" slurm-slurmctld:"$CONFIG"
 podman exec slurm-slurmctld chown 2000:2000 "$CONFIG"
 rm "$TMP_CONFIG"
 
-# ── 6. Create activation script ──────────────────────────────────────────
+# ── 7. Create activation script ──────────────────────────────────────────
 podman exec --user testuser -w /home/testuser slurm-slurmctld \
     sh -c "cat > $HPC_HOME/activate.sh <<SCRIPT
 export NS_HPC_CONFIG=$CONFIG
@@ -114,7 +120,7 @@ export PATH=$VENV/bin:\$PATH
 export PS1=\"(ns-hpc) \$PS1\"
 SCRIPT"
 
-# ── 7. Verify ─────────────────────────────────────────────────────────────
+# ── 8. Verify ─────────────────────────────────────────────────────────────
 echo "=== Verifying ==="
 podman exec --user testuser -w /home/testuser slurm-slurmctld \
     ns-hpc doctor 2>&1 | head -10 || true
@@ -123,7 +129,7 @@ echo ""
 echo "=== ns-hpc Slurm cluster ready ==="
 echo "Config:     $CONFIG"
 echo "Venv:       $VENV"
-echo "Instances:  /home/testuser/mcp_instances"
+echo "Instances:  /home/testuser/.local/share/ns-hpc/instances"
 echo ""
 echo "Activate:   source $HPC_HOME/activate.sh"
 echo ""

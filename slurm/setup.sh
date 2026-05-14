@@ -93,8 +93,8 @@ output_mount = "/output"
 status_fd = 3
 
 [proxied_mcps.filesystem]
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/"]
+command = "mcp-server-filesystem"
+args = ["/"]
 
 [resource_defaults]
 context_dirs = ["~/.local/ns-hpc/context"]

@@ -123,7 +123,12 @@ def _default_config() -> Config:
             workspace_mount="/workspace",
             flags=["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"],
         ),
-        proxied_mcps={},
+        proxied_mcps={
+            "filesystem": ProxiedMCP(
+                command="npx",
+                args=["-y", "@modelcontextprotocol/server-filesystem", "/"],
+            ),
+        },
         resource_defaults=ResourceDefaults(
             context_dirs=["context"],
             resource_patterns=["*.md"],

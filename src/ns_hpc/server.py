@@ -96,7 +96,7 @@ async def _register_proxied_tools(server: FastMCP, config: Config) -> ProxyManag
     pm = ProxyManager()
 
     for proxy_name, proxy_cfg in config.proxied_mcps.items():
-        remote_tools = await discover_tools(proxy_cfg)
+        remote_tools = await discover_tools(proxy_cfg, config)
         if not remote_tools:
             logger = __import__("logging").getLogger("ns-hpc")
             logger.warning("no tools discovered for proxied MCP %r, skipping", proxy_name)

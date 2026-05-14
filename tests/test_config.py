@@ -22,7 +22,8 @@ def test_default_config_values():
     cfg = _default_config()
     assert cfg.namespace_defaults.workspace_mount == "/workspace"
     assert "--share-net" in cfg.namespace_defaults.flags
-    assert cfg.proxied_mcps == {}
+    assert "filesystem" in cfg.proxied_mcps
+    assert cfg.proxied_mcps["filesystem"].command == "npx"
     assert cfg.resource_defaults.context_dirs == ["context"]
     assert cfg.resource_defaults.resource_patterns == ["*.md"]
     assert cfg.slurm.partition == "debug"

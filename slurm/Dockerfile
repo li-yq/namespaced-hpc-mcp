@@ -1,7 +1,7 @@
 FROM docker.io/giovtorres/slurm-docker-cluster:latest
 
 RUN set -ex \
-    && dnf -y install --enablerepo=epel tini \
+    && dnf -y install --enablerepo=epel tini nodejs \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 

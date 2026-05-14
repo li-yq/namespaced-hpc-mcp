@@ -18,7 +18,7 @@ from fastmcp.client import Client
 from fastmcp.client.transports import StdioTransport
 from mcp.types import TextContent, Tool
 
-from ns_hpc.config import ProxiedMCP
+from ns_hpc.config import Config, ProxiedMCP
 
 logger = logging.getLogger("ns-hpc")
 
@@ -32,11 +32,15 @@ def _build_bwrap_cmd(instance_id: str, command: str, args: list[str] | None) -> 
     ]
 
 
-async def discover_tools(cfg: ProxiedMCP) -> list[Tool]:
-    """Start the MCP server temporarily (outside bwrap) and list its tools.
+async def discover_tools(cfg: ProxiedMCP, config: Config | None = None) -> list[Tool]:
+    """Start the MCP server and list its tools.
 
-    Returns an empty list if the server cannot be reached or does not respond.
+    When *config* is provided, the server runs inside a bwrap sandbox
+    (disposable temp workspace, empty home).  Otherwise it runs on the host.
     """
+    if config is not None:
+        return await _discover_tools_bwrap(config, cfg)
+
     transport = StdioTransport(
         command=cfg.command,
         args=cfg.args or [],
@@ -47,6 +51,45 @@ async def discover_tools(cfg: ProxiedMCP) -> list[Tool]:
             return await client.list_tools()
     except Exception as e:
         logger.warning("failed to discover tools from proxied MCP %r: %s", cfg.command, e)
+        return []
+
+
+async def _discover_tools_bwrap(config: Config, cfg: ProxiedMCP) -> list[Tool]:
+    """Discover tools inside a sandbox that mirrors a real instance namespace.
+
+    The sandbox uses the same ``bind_ro`` and flags as a real instance,
+    but ``/workspace`` and ``/output`` are empty tmpfs mounts instead of
+    real host directories — no host data is exposed to discovery.
+    """
+    command = [cfg.command] + (cfg.args or [])
+    env = {**os.environ, **(cfg.env or {})} if cfg.env else None
+    ns = config.namespace_defaults
+
+    args = ["bwrap"]
+    args.extend(ns.flags)
+
+    for host_path in ns.bind_ro:
+        args.extend(["--ro-bind", host_path, host_path])
+
+    # Empty sandbox — tmpfs instead of real instance directories
+    args.extend(["--tmpfs", ns.workspace_mount])
+    args.extend(["--tmpfs", "/output"])
+    args.extend(["--tmpfs", "/home"])
+
+    args.extend(["--chdir", ns.workspace_mount])
+    args.append("--")
+    args.extend(command)
+
+    transport = StdioTransport(
+        command=args[0],
+        args=args[1:],
+        env=env,
+    )
+    try:
+        async with Client(transport) as client:
+            return await client.list_tools()
+    except Exception as e:
+        logger.warning("failed to discover tools in bwrap for %r: %s", cfg.command, e)
         return []
 
 

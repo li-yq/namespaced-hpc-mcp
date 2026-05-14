@@ -4,7 +4,9 @@ workspace_mount = "/workspace"
 flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
 status_fd = 3
 
-[proxied_mcps]
+[proxied_mcps.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/"]
 
 [resource_defaults]
 context_dirs = ["context"]

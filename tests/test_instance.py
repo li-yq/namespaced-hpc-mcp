@@ -44,6 +44,13 @@ def test_create_duplicate(tmp_path):
         Instance.create("test-dup", cfg)
 
 
+def test_create_invalid_instance_id(tmp_path):
+    cfg = _config(str(tmp_path))
+    import pytest
+    with pytest.raises(ValueError, match="Invalid instance_id"):
+        Instance.create("../evil", cfg)
+
+
 def test_load_instance(tmp_path):
     cfg = _config(str(tmp_path))
     Instance.create("test-002", cfg)

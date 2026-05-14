@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +51,11 @@ class Instance:
         Returns:
             New Instance object.
         """
+        if not re.match(r"^[a-zA-Z0-9_.-]+$", instance_id):
+            raise ValueError(
+                f"Invalid instance_id {instance_id!r}: must match [a-zA-Z0-9_.-]+"
+            )
+
         instances_dir = config.resolve_instances_dir()
         base_dir = instances_dir / instance_id
 

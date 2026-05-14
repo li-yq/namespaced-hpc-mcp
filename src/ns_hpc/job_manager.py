@@ -408,7 +408,7 @@ class JobManager:
         ]
         for name, spec in self.config.slurm.resources.items():
             value = (slurm_resources or {}).get(name, spec.default)
-            if value:
+            if value is not None:
                 # Validate against configured max
                 spec_max = spec.max
                 try:

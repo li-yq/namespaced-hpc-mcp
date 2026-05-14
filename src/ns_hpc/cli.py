@@ -121,6 +121,24 @@ def list_cmd():
         print(f"{inst.id:20s}  created: {created}")
 
 
+@instance_app.command(name="list-archived")
+def list_archived_cmd():
+    """List all archived instances."""
+    cfg = load_config()
+    archived = Instance.list_archived_instances(cfg)
+    if not archived:
+        print("No archived instances found.")
+        raise typer.Exit()
+
+    for entry in archived:
+        label = entry["instance_id"]
+        if entry["archived_at"]:
+            label += f"  archived: {entry['archived_at'][:19]}"
+        if entry["created_at"]:
+            label += f"  created: {entry['created_at'][:19]}"
+        print(label)
+
+
 @instance_app.command()
 def create(
     instance_id: str = typer.Argument(help="Unique instance identifier"),
@@ -341,7 +359,7 @@ def destroy(
     instance_id: str = typer.Argument(help="Instance ID"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
 ):
-    """Remove an instance and its workspace."""
+    """Archive an instance, disabling new job submissions."""
     cfg = load_config()
     inst = Instance.load(instance_id, cfg)
 
@@ -350,13 +368,18 @@ def destroy(
         raise typer.Exit(code=1)
 
     if not force:
-        confirm = input(f"Destroy instance '{instance_id}' and all its data? [y/N] ")
+        confirm = input(f"Archive instance '{instance_id}' and disable new jobs? [y/N] ")
         if confirm.lower() not in ("y", "yes"):
             print("Aborted.")
             return
 
-    Instance.destroy(instance_id, cfg)
-    print(f"Destroyed instance '{instance_id}'.")
+    try:
+        inst.archive(cfg)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(code=1)
+
+    print(f"Archived instance '{instance_id}'.")
 
 
 @instance_app.command()

@@ -175,11 +175,15 @@ def clean_instances(days: int, force: bool) -> None:
         print(f"  {inst.id} {age}")
 
     if not force:
-        confirm = input("Destroy these instances? [y/N] ")
+        confirm = input("Archive these instances? [y/N] ")
         if confirm.lower() not in ("y", "yes"):
             print("Aborted.")
             return
 
     for inst, _ in stale:
-        Instance.destroy(inst.id, cfg)
-        print(f"  Destroyed {inst.id}")
+        try:
+            inst.archive(cfg)
+        except RuntimeError as e:
+            print(f"  Skipped {inst.id}: {e}")
+            continue
+        print(f"  Archived {inst.id}")

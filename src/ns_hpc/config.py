@@ -1,5 +1,6 @@
 import logging
 import os
+import typing
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -163,9 +164,8 @@ def _deep_merge(base: dict, override: dict) -> dict:
 def _warn_unknown_keys(data: dict, model_cls: type[BaseModel], prefix: str = "") -> None:
     """Warn about keys in *data* that don't match the fields of *model_cls*.
 
-    Recurses into nested dicts whose field type is itself a Pydantic model.
-    Dict-of-model fields (e.g. ``proxied_mcps``) are not checked beyond the
-    top-level key since their keys are user-defined.
+    Recurses into nested dicts whose field type is itself a Pydantic model,
+    and into dict-of-model fields (e.g. ``dict[str, ProxiedMCP]``).
     """
     for key in data:
         path = f"{prefix}.{key}" if prefix else key
@@ -178,6 +178,13 @@ def _warn_unknown_keys(data: dict, model_cls: type[BaseModel], prefix: str = "")
             # Directly nested Pydantic model (e.g. namespace_defaults → NamespaceDefaults)
             if hasattr(ft, "model_fields"):
                 _warn_unknown_keys(val, ft, path)
+            # dict[str, SomeModel] — check each entry's keys
+            elif typing.get_origin(ft) is dict:
+                value_type = typing.get_args(ft)[1]
+                if hasattr(value_type, "model_fields"):
+                    for sub_key, sub_val in val.items():
+                        if isinstance(sub_val, dict):
+                            _warn_unknown_keys(sub_val, value_type, f"{path}.{sub_key}")
 
 
 def load_config(path: str | Path | None = None) -> Config:

@@ -190,7 +190,7 @@ class ListInstancesInput(BaseModel):
 
 @mcp.tool(annotations={"readOnlyHint": True})
 async def list_instances(input: ListInstancesInput, ctx: Context) -> str:
-    """List all existing sandbox instances."""
+    """List all active (non-archived) sandbox instances."""
     context: ServerContext = ctx.lifespan_context
 
     instances = Instance.list_instances(context.config)
@@ -219,7 +219,7 @@ class ListArchivedInstancesInput(BaseModel):
 
 @mcp.tool(annotations={"readOnlyHint": True})
 async def list_archived_instances(input: ListArchivedInstancesInput, ctx: Context) -> str:
-    """List all archived sandbox instances."""
+    """List all archived (previously destroyed) sandbox instances."""
     context: ServerContext = ctx.lifespan_context
 
     archived = Instance.list_archived_instances(context.config)
@@ -250,7 +250,11 @@ class ArchiveInstanceInput(BaseModel):
 
 @mcp.tool()
 async def archive_instance(input: ArchiveInstanceInput, ctx: Context) -> str:
-    """Archive a sandbox instance, disabling new job submissions."""
+    """Archive a sandbox instance, disabling new job submissions.
+
+    Fails with an error if the instance has any running jobs — cancel
+    or wait for them before archiving.
+    """
     context: ServerContext = ctx.lifespan_context
 
     instance = Instance.load(input.instance_id, context.config)
@@ -299,7 +303,7 @@ async def update_instance(input: UpdateInstanceInput, ctx: Context) -> str:
 
 class SubmitJobInput(BaseModel):
     instance_id: str = Field(..., description="Existing instance ID")
-    command: str = Field(..., description="Shell command to run")
+    command: str = Field(..., description="Shell command to run inside the bwrap sandbox")
     mode: str = Field(
         default="local",
         description="Execution mode: 'local' (bwrap) or 'slurm' (sbatch)",
@@ -463,7 +467,10 @@ class CancelJobInput(BaseModel):
 
 @mcp.tool()
 async def cancel_job(input: CancelJobInput, ctx: Context) -> dict:
-    """Cancel a running job and return its final status and output tail."""
+    """Cancel a running job and return its final status and output tail.
+
+    Safe to call on already-finished jobs (no-op, returns current status).
+    """
     config: Config = ctx.lifespan_context.config
 
     instance = Instance.load(input.instance_id, config)

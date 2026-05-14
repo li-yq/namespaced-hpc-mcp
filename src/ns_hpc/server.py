@@ -240,6 +240,32 @@ async def list_archived_instances(input: ListArchivedInstancesInput, ctx: Contex
     return "\n".join(lines)
 
 
+class ArchiveInstanceInput(BaseModel):
+    """Input for the archive_instance tool."""
+    instance_id: str = Field(
+        ...,
+        description="ID of the instance to archive",
+    )
+
+
+@mcp.tool()
+async def archive_instance(input: ArchiveInstanceInput, ctx: Context) -> str:
+    """Archive a sandbox instance, disabling new job submissions."""
+    context: ServerContext = ctx.lifespan_context
+
+    instance = Instance.load(input.instance_id, context.config)
+    if instance is None:
+        raise ToolError(f"Instance '{input.instance_id}' not found")
+
+    context.job_managers.pop(input.instance_id, None)
+    await context.proxy_manager.stop_all(input.instance_id)
+    try:
+        instance.archive(context.config)
+    except RuntimeError as e:
+        raise ToolError(str(e))
+    return f"Instance '{input.instance_id}' archived."
+
+
 class UpdateInstanceInput(BaseModel):
     """Input for the update_instance tool."""
     instance_id: str = Field(

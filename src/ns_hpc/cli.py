@@ -355,6 +355,34 @@ def cancel(
         print(f"Job '{job_id}' not found.")
 
 @instance_app.command()
+def archive(
+    instance_id: str = typer.Argument(help="Instance ID"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
+):
+    """Archive an instance, disabling new job submissions."""
+    cfg = load_config()
+    inst = Instance.load(instance_id, cfg)
+
+    if inst is None:
+        print(f"Error: instance '{instance_id}' not found.", file=sys.stderr)
+        raise typer.Exit(code=1)
+
+    if not force:
+        confirm = input(f"Archive instance '{instance_id}' and disable new jobs? [y/N] ")
+        if confirm.lower() not in ("y", "yes"):
+            print("Aborted.")
+            return
+
+    try:
+        inst.archive(cfg)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(code=1)
+
+    print(f"Archived instance '{instance_id}'.")
+
+
+@instance_app.command()
 def enter(
     instance_id: str = typer.Argument(help="Instance ID"),
 ):

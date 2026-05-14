@@ -104,9 +104,9 @@ See `config.toml` for the full default configuration.
 | `ns-hpc instance enter <id>` | Interactive bash in sandbox |
 | `ns-hpc instance describe <id>` | Show instance metadata |
 | `ns-hpc instance update <id> -d <desc>` | Update instance description |
-| `ns-hpc instance list-archived` | List archived instances |
+| `ns-hpc instance archive <id>` | Archive an instance, disabling new job submissions |
 | `ns-hpc run` | Start MCP server (stdio) |
-| `ns-hpc clean --days 7` | Archive stale instances |
+| `ns-hpc clean --days 7` | Remove stale instances |
 
 ## MCP Tools
 
@@ -114,8 +114,9 @@ See `config.toml` for the full default configuration.
 |------|-------------|
 | `create_instance` | Create a new sandbox instance |
 | `list_instances` | List all instances |
-| `list_archived_instances` | List archived instances with metadata |
 | `update_instance` | Update instance metadata (description) |
+| `archive_instance` | Archive an instance, disabling new job submissions |
+| `list_archived_instances` | List all archived instances |
 | `submit_job` | Submit a command as an async job |
 | `poll_job` | Poll a running job (optionally wait for completion) |
 | `list_jobs` | List all tracked jobs for an instance |

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 from typing import Any
 
 from fastmcp.client import Client
@@ -22,22 +21,6 @@ from ns_hpc.config import Config, ProxiedMCP
 from ns_hpc.namespace import build_bwrap_args
 
 logger = logging.getLogger("ns-hpc")
-
-
-def _build_bwrap_cmd(
-    instance_id: str, command: str, args: list[str] | None
-) -> list[str]:
-    """Build argv for ``python -m ns_hpc bwrap <id> -- <command> <args>``."""
-    return [
-        sys.executable,
-        "-m",
-        "ns_hpc",
-        "bwrap",
-        instance_id,
-        "--",
-        command,
-        *(args or []),
-    ]
 
 
 async def discover_tools(cfg: ProxiedMCP, config: Config) -> list[Tool]:
@@ -75,10 +58,11 @@ async def discover_tools(cfg: ProxiedMCP, config: Config) -> list[Tool]:
 class ProxiedMCPClient:
     """One connection to a proxied MCP server running inside an instance."""
 
-    def __init__(self, proxy_name: str, instance_id: str, cfg: ProxiedMCP) -> None:
+    def __init__(self, proxy_name: str, instance_id: str, cfg: ProxiedMCP, config: Config) -> None:
         self.proxy_name = proxy_name
         self.instance_id = instance_id
         self.cfg = cfg
+        self.config = config
         self._client: Client | None = None
 
     async def ensure_connected(self) -> Client:
@@ -90,10 +74,27 @@ class ProxiedMCPClient:
         if not self.cfg.command or "\0" in self.cfg.command:
             raise ValueError(f"Invalid proxied MCP command {self.cfg.command!r}")
 
-        cmd = _build_bwrap_cmd(self.instance_id, self.cfg.command, self.cfg.args)
+        # Build bwrap args directly (avoids --json-status-fd from the CLI path)
+        from ns_hpc.instance import Instance
+
+        inst = Instance.load(self.instance_id, self.config)
+        if inst is None:
+            raise ValueError(f"Instance '{self.instance_id}' not found")
+
+        cmd = [self.cfg.command] + (self.cfg.args or [])
+        ns = self.config.namespace_defaults
+        shared_output_root = self.config.resolve_instances_dir() / "output"
+        bargs = build_bwrap_args(
+            command=cmd,
+            workspace_host_path=str(inst.workspace_dir),
+            config=self.config,
+            extra_rw_binds=[(str(inst.output_path), ns.output_mount)],
+            extra_ro_binds=[(str(shared_output_root), "/shared-output")],
+        )
+
         transport = StdioTransport(
-            command=cmd[0],
-            args=cmd[1:],
+            command=bargs[0],
+            args=bargs[1:],
             env={**os.environ, **(self.cfg.env or {})} if self.cfg.env else None,
             keep_alive=True,
         )
@@ -132,12 +133,13 @@ class ProxyManager:
         proxy_name: str,
         instance_id: str,
         cfg: ProxiedMCP,
+        config: Config,
     ) -> ProxiedMCPClient:
         """Return an existing client for *proxy_name*/*instance_id* or create one."""
         by_instance = self._clients.setdefault(proxy_name, {})
         client = by_instance.get(instance_id)
         if client is None:
-            client = ProxiedMCPClient(proxy_name, instance_id, cfg)
+            client = ProxiedMCPClient(proxy_name, instance_id, cfg, config)
             by_instance[instance_id] = client
         return client
 

@@ -80,7 +80,7 @@ def _make_proxy_handler(
         instance_id = kwargs.pop("instance_id")
         if not Instance.load(instance_id, config):
             raise ToolError(f"Instance '{instance_id}' not found")
-        client = pm.get_or_start(proxy_name, instance_id, cfg)
+        client = pm.get_or_start(proxy_name, instance_id, cfg, config)
         await client.ensure_connected()
         result = await client.call_tool(remote_name, kwargs)
         texts = [

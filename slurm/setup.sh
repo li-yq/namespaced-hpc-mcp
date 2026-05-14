@@ -86,12 +86,12 @@ done
 # Write config via host temp file (avoids quoting/escaping issues)
 TMP_CONFIG="$(mktemp)"
 cat > "$TMP_CONFIG" <<'TOML'
+instances_dir = "/home/testuser/.local/share/ns-hpc/instances"
+
 [namespace_defaults]
 bind_ro = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]
 workspace_mount = "/workspace"
 flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
-output_mount = "/output"
-status_fd = 3
 
 [proxied_mcps.filesystem]
 command = "mcp-server-filesystem"
@@ -125,8 +125,6 @@ max = 8
 parameter = "--mem={}"
 default = "4G"
 max = "32G"
-
-instances_dir = "/home/testuser/.local/share/ns-hpc/instances"
 TOML
 podman cp "$TMP_CONFIG" slurm-slurmctld:"$CONFIG"
 podman exec slurm-slurmctld chown 2000:2000 "$CONFIG"

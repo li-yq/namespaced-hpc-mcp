@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import sys
 from typing import Any
 
@@ -32,64 +31,43 @@ def _build_bwrap_cmd(instance_id: str, command: str, args: list[str] | None) -> 
     ]
 
 
-async def discover_tools(cfg: ProxiedMCP, config: Config | None = None) -> list[Tool]:
-    """Start the MCP server and list its tools.
-
-    When *config* is provided, the server runs inside a bwrap sandbox
-    (disposable temp workspace, empty home).  Otherwise it runs on the host.
-    """
-    if config is not None:
-        return await _discover_tools_bwrap(config, cfg)
-
-    transport = StdioTransport(
-        command=cfg.command,
-        args=cfg.args or [],
-        env={**os.environ, **(cfg.env or {})} if cfg.env else None,
-    )
-    try:
-        async with Client(transport) as client:
-            return await client.list_tools()
-    except Exception as e:
-        logger.warning("failed to discover tools from proxied MCP %r: %s", cfg.command, e)
-        return []
-
-
-async def _discover_tools_bwrap(config: Config, cfg: ProxiedMCP) -> list[Tool]:
-    """Discover tools inside a sandbox that mirrors a real instance namespace.
+async def discover_tools(cfg: ProxiedMCP, config: Config) -> list[Tool]:
+    """Discover tools inside a bwrap sandbox that mirrors a real instance.
 
     The sandbox uses the same ``bind_ro`` and flags as a real instance,
-    but ``/workspace`` and ``/output`` are empty tmpfs mounts instead of
-    real host directories — no host data is exposed to discovery.
+    but ``/workspace`` and ``/output`` are empty tmpfs mounts —
+    no host data is exposed to discovery.
     """
     command = [cfg.command] + (cfg.args or [])
     env = {**os.environ, **(cfg.env or {})} if cfg.env else None
     ns = config.namespace_defaults
 
-    args = ["bwrap"]
-    args.extend(ns.flags)
-
-    for host_path in ns.bind_ro:
-        args.extend(["--ro-bind", host_path, host_path])
+    bargs = ["bwrap"]
+    bargs.extend(ns.flags)
 
     # Empty sandbox — tmpfs instead of real instance directories
-    args.extend(["--tmpfs", ns.workspace_mount])
-    args.extend(["--tmpfs", "/output"])
-    args.extend(["--tmpfs", "/home"])
+    bargs.extend(["--tmpfs", ns.workspace_mount])
+    bargs.extend(["--tmpfs", "/output"])
+    bargs.extend(["--tmpfs", "/home"])
 
-    args.extend(["--chdir", ns.workspace_mount])
-    args.append("--")
-    args.extend(command)
+    # Explicit bind_ro overlays sandbox defaults
+    for host_path in ns.bind_ro:
+        bargs.extend(["--ro-bind", host_path, host_path])
+
+    bargs.extend(["--chdir", ns.workspace_mount])
+    bargs.append("--")
+    bargs.extend(command)
 
     transport = StdioTransport(
-        command=args[0],
-        args=args[1:],
+        command=bargs[0],
+        args=bargs[1:],
         env=env,
     )
     try:
         async with Client(transport) as client:
             return await client.list_tools()
     except Exception as e:
-        logger.warning("failed to discover tools in bwrap for %r: %s", cfg.command, e)
+        logger.warning("failed to discover tools for %r: %s", cfg.command, e)
         return []
 
 
@@ -107,11 +85,7 @@ class ProxiedMCPClient:
         if self._client is not None:
             return self._client
 
-        # Validate instance_id is a safe filesystem identifier
-        if not re.match(r"^[a-zA-Z0-9_.-]+$", self.instance_id):
-            raise ValueError(
-                f"Invalid instance_id {self.instance_id!r}: must match [a-zA-Z0-9_.-]+"
-            )
+        # Validate proxied MCP command
         if not self.cfg.command or "\0" in self.cfg.command:
             raise ValueError(f"Invalid proxied MCP command {self.cfg.command!r}")
 

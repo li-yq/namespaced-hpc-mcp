@@ -146,14 +146,6 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[ServerContext]:
         yield context
     finally:
         await context.proxy_manager.close_all()
-        running = sum(
-            1 for mgr in context.job_managers.values()
-            for j in mgr.list_jobs()
-            if j.get("status") == "running"
-        )
-        if running:
-            logger = __import__("logging").getLogger("ns-hpc")
-            logger.warning("server shutting down with %d running job(s)", running)
 
 
 # Create the MCP server with lifespan

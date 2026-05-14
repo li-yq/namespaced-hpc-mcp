@@ -376,8 +376,8 @@ class JobManager:
 
         # Wrap with systemd-run for cgroup v2 resource limits (best-effort)
         if self.config.resources.use_systemd:
-            cpus = self.config.resources.cpus.limit
-            memory = parse_memory(self.config.resources.memory.limit)
+            cpus = self.config.resources.cpus
+            memory = parse_memory(self.config.resources.memory)
             runner = [
                 "systemd-run", "--user", "--scope",
                 "-p", f"CPUQuota={cpus * 100}%",

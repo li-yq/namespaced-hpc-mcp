@@ -57,27 +57,16 @@ context_dirs = ["context"]
 # Use systemd-run --scope for cgroup CPU/memory limits.
 # Set to false on systems without systemd (containers, WSL2).
 # use_systemd = true
-
-[resources.cpus]
 # CPU quota as a fixed upper bound (applied as CPUQuota= in systemd-run).
-# limit = 4
-
-[resources.memory]
-# Memory limit as a fixed upper bound (applied as MemoryMax= in systemd-run).
-# Supports K, M, G, T and Ki, Mi, Gi, Ti suffixes.
-# limit = "8G"
+# cpus = 4
+# Memory limit (applied as MemoryMax=).  Supports K, M, G, T / Ki, Mi, Gi, Ti.
+# memory = "8G"
 
 # ── Slurm batch submission ───────────────────────────────────────────────────
 [slurm]
 # Default Slurm partition.
 # partition = "debug"
 partition = "cpu"
-# Default CPUs (also used when slurm.resources.{}.default is unset).
-# default_cpus = 1
-# Default memory in GB (also used when slurm.resources.{}.default is unset).
-# default_memory_gb = 4
-# Default timeout in seconds.
-# default_timeout = 3600
 
 # Per-resource sbatch parameter templates.
 [slurm.resources.cpus]

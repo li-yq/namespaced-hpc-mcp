@@ -163,9 +163,6 @@ resource_patterns = ["*.md"]
 
 [slurm]
 partition = "compute"
-default_cpus = 1
-default_memory_gb = 4
-default_timeout = 3600
 
 [slurm.resources.cpus]
 parameter = "--cpus-per-task={}"

@@ -64,20 +64,10 @@ class ResourceDefaults(BaseModel):
     resource_patterns: list[str] = ["*.md"]
 
 
-class CpuLimit(BaseModel):
-    """Local cgroup CPU limit."""
-    limit: int = 4
-
-
-class MemoryLimit(BaseModel):
-    """Local cgroup memory limit."""
-    limit: str = "8G"
-
-
 class Resources(BaseModel):
     """Local cgroup resource limits — fixed upper bounds."""
-    cpus: CpuLimit = CpuLimit()
-    memory: MemoryLimit = MemoryLimit()
+    cpus: int = 4
+    memory: str = "8G"
     use_systemd: bool = True
 
 
@@ -94,9 +84,6 @@ class SlurmConfig(BaseModel):
         "cpus": SlurmResource(parameter="--cpus-per-task={}", default=1, max=8),
         "memory": SlurmResource(parameter="--mem={}", default="4G", max="32G"),
     }
-    default_cpus: int = 1
-    default_memory_gb: int = 4
-    default_timeout: int = 3600
 
 
 class JobConfig(BaseModel):

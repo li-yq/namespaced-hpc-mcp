@@ -34,7 +34,7 @@ _CONFIG_TOML = """\
 instances_dir = "{instances_dir}"
 
 [namespace_defaults]
-bind_ro = ["/usr", "/bin", "/lib", "/lib64"]
+bind_ro = ["/usr", "/bin", "/lib", "/lib64", "/etc"]
 workspace_mount = "/workspace"
 flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev",
          "--tmpfs", "/tmp"]
@@ -50,6 +50,9 @@ partition = "cpu"
 default_cpus = 1
 default_memory_gb = 4
 default_timeout = 3600
+
+[resources]
+use_systemd = false
 """
 
 # Produces ~10 lines over ~20s — great for tail and timing tests.
@@ -539,7 +542,13 @@ async def run_resources(log: SessionLog) -> None:
 
 
 async def main():
-    tmp_dir = tempfile.mkdtemp(prefix="ns-hpc-int-")
+    # Config must be on the shared volume for Slurm compute nodes to access it
+    if check_slurm():
+        shared_root = Path("/home/testuser/tmp")
+        shared_root.mkdir(parents=True, exist_ok=True)
+        tmp_dir = tempfile.mkdtemp(dir=str(shared_root), prefix="ns-hpc-int-")
+    else:
+        tmp_dir = tempfile.mkdtemp(prefix="ns-hpc-int-")
     cfg = _test_config(tmp_dir)
     log = SessionLog()
 

@@ -4,7 +4,15 @@ HPC sandboxing via bubblewrap — an MCP server that executes code inside
 bwrap containers with read-only system paths and an isolated workspace.
 
 ```bash
-pip install ns-hpc   # or: uv add ns-hpc
+# Install from GitHub
+pip install git+https://github.com/li-yq/namespaced-hpc-mcp.git
+
+# Or with uv
+uv add git+https://github.com/li-yq/namespaced-hpc-mcp.git
+
+# Editable install from a local clone
+git clone https://github.com/li-yq/namespaced-hpc-mcp.git
+pip install -e namespaced-hpc-mcp
 ```
 
 ## Quick Start
@@ -130,7 +138,7 @@ Set up ns-hpc on a login or compute node so the MCP server connects via SSH stdi
 
 ```bash
 # 1. Install the package
-pip install ns-hpc
+pip install git+https://github.com/li-yq/namespaced-hpc-mcp.git
 
 # Verify prerequisites
 ns-hpc doctor

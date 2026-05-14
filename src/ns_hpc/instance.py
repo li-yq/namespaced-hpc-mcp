@@ -93,7 +93,7 @@ class Instance:
 
     @staticmethod
     def list_instances(config: Config) -> list[Instance]:
-        """List all existing instances sorted by creation time."""
+        """List all existing instances sorted by directory name."""
         instances_dir = config.resolve_instances_dir()
         if not instances_dir.exists():
             return []

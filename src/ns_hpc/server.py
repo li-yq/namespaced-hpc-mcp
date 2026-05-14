@@ -303,11 +303,11 @@ async def submit_job(input: SubmitJobInput, ctx: Context) -> dict:
     directly to disk files.  The tool waits up to ``timeout`` seconds,
     then either returns the result (completed) or a running state.
 
-    When ``detach=False`` (default): if the job exceeds timeout, it is
-    killed and partial output is returned.
+    When ``detach=True`` (default): if the job exceeds timeout, it keeps
+    running in the background.  Use ``poll_job`` to check on it later.
 
-    When ``detach=True``: if the job exceeds timeout, it keeps running
-    in the background.  Use ``poll_job`` to check on it later.
+    When ``detach=False``: if the job exceeds timeout, it is killed and
+    partial output is returned.
     """
     config: Config = ctx.lifespan_context.config
 
@@ -326,9 +326,10 @@ async def submit_job(input: SubmitJobInput, ctx: Context) -> dict:
         slurm_resources=input.slurm_resources,
     )
 
-    # Handle detach: if still running after timeout, keep it running
+    # Handle detach: if still running after timeout, kill it
     if result.status == JobStatus.RUNNING and not input.detach:
-        mgr.cancel_and_tail(result, input.tail)
+        mgr.cancel(result.job_id)
+        result = mgr.poll(result.job_id, tail=input.tail)
 
     # Audit outcome
     if result.status == JobStatus.RUNNING:
@@ -385,7 +386,8 @@ async def poll_job(input: PollJobInput, ctx: Context) -> dict:
         raise ToolError(f"Job '{input.job_id}' not found or already finished")
 
     if result.status == JobStatus.RUNNING and not input.detach:
-        mgr.cancel_and_tail(result, input.tail)
+        mgr.cancel(input.job_id)
+        result = mgr.poll(input.job_id, tail=input.tail)
 
     # Audit outcome
     if result.status == JobStatus.RUNNING:

@@ -37,9 +37,11 @@ ns-hpc clean --days 7
 
 ## Configuration
 
-Create `config.toml` in the project root:
+Create `~/.config/ns-hpc/config.toml` (auto-discovered) or `config.toml` in the project root:
 
 ```toml
+instances_dir = "${HOME}/.local/share/ns-hpc/instances"
+
 [namespace_defaults]
 bind_ro = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]
 workspace_mount = "/workspace"
@@ -51,7 +53,7 @@ context_dirs = ["context"]
 resource_patterns = ["*.md"]
 ```
 
-See `config.toml` for the full default configuration.
+See `config/config.toml` for the full default configuration.
 
 ## Architecture
 

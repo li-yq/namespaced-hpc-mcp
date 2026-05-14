@@ -1,6 +1,7 @@
 """Tests for the instance lifecycle module."""
 
 import json
+import os
 from pathlib import Path
 
 from ns_hpc.instance import Instance
@@ -145,3 +146,199 @@ def test_get_set_description(tmp_path):
     loaded = Instance.load("test-desc", cfg)
     assert loaded is not None
     assert loaded.get_description() == "updated description"
+
+
+# ── Archive tests ──────────────────────────────────────────────────────────
+
+
+def test_archive_instance(tmp_path):
+    """Archive marks metadata and moves directory to .archived/<id>__<ts>/."""
+    cfg = _config(str(tmp_path))
+    inst = Instance.create("test-arch", cfg)
+    assert inst.exists
+
+    result = inst.archive(cfg)
+    assert result is True
+
+    # Directory moved away from original path
+    assert not inst.base_dir.exists()
+
+    # Metadata has archived fields
+    assert inst.is_archived()
+
+    # Dir exists under .archived/ with timestamp suffix
+    archived_root = cfg.resolve_instances_dir() / ".archived"
+    assert archived_root.exists()
+    entries = sorted(archived_root.iterdir())
+    assert len(entries) == 1
+    child = entries[0]
+    assert child.name.startswith("test-arch__")
+    assert child.is_dir()
+    assert (child / "metadata.json").exists()
+
+
+def test_archive_twice(tmp_path):
+    """Second archive call returns False."""
+    cfg = _config(str(tmp_path))
+    inst = Instance.create("test-twice", cfg)
+    assert inst.archive(cfg) is True
+    assert inst.archive(cfg) is False
+
+
+def test_archive_instance_not_found_by_load(tmp_path):
+    """After archive, Instance.load() returns None."""
+    cfg = _config(str(tmp_path))
+    Instance.create("test-gone", cfg)
+    Instance.load("test-gone", cfg).archive(cfg)
+    assert Instance.load("test-gone", cfg) is None
+
+
+def test_archive_not_listed(tmp_path):
+    """Archived instance does not appear in list_instances()."""
+    cfg = _config(str(tmp_path))
+    Instance.create("arch-visible", cfg)
+    Instance.create("arch-hidden", cfg).archive(cfg)
+
+    ids = [i.id for i in Instance.list_instances(cfg)]
+    assert "arch-visible" in ids
+    assert "arch-hidden" not in ids
+
+
+def test_archive_then_recreate_same_name(tmp_path):
+    """After archiving, a new instance can be created with the same name."""
+    cfg = _config(str(tmp_path))
+    inst = Instance.create("test-reuse", cfg)
+    inst.archive(cfg)
+
+    # Should succeed — original dir was moved
+    inst2 = Instance.create("test-reuse", cfg)
+    assert inst2.exists
+    assert inst2.id == "test-reuse"
+
+
+def test_list_archived_instances(tmp_path):
+    """list_archived_instances() returns all archived instances."""
+    cfg = _config(str(tmp_path))
+    Instance.create("arch-a", cfg).archive(cfg)
+    Instance.create("arch-b", cfg).archive(cfg)
+
+    archived = Instance.list_archived_instances(cfg)
+    assert len(archived) == 2
+    ids = [e["instance_id"] for e in archived]
+    assert "arch-a" in ids
+    assert "arch-b" in ids
+
+
+def test_list_archived_empty(tmp_path):
+    """list_archived_instances() returns [] when none exist."""
+    cfg = _config(str(tmp_path))
+    assert Instance.list_archived_instances(cfg) == []
+
+
+def test_archive_duplicate_name_no_clash(tmp_path):
+    """Archiving the same name twice creates two separate timestamped dirs."""
+    cfg = _config(str(tmp_path))
+
+    # First instance
+    inst1 = Instance.create("test-clash", cfg)
+    inst1.archive(cfg)
+
+    # Second instance (same name, fresh creation)
+    inst2 = Instance.create("test-clash", cfg)
+    inst2.archive(cfg)
+
+    # Both archived dirs exist with different timestamps
+    archived_root = cfg.resolve_instances_dir() / ".archived"
+    entries = sorted(archived_root.iterdir())
+    assert len(entries) == 2
+    for child in entries:
+        assert child.name.startswith("test-clash__")
+    assert entries[0].name != entries[1].name
+
+
+def test_archive_shared_output_moved(tmp_path):
+    """Archiving moves the shared output directory too."""
+    cfg = _config(str(tmp_path))
+    inst = Instance.create("test-output", cfg)
+
+    # Verify shared output dir exists before archive
+    shared_root = cfg.resolve_instances_dir() / "output"
+    output_before = shared_root / "test-output"
+    assert output_before.is_dir()
+
+    inst.archive(cfg)
+
+    # Original output dir is gone
+    assert not output_before.exists()
+
+    # Output dir exists under timestamped name
+    output_entries = sorted(shared_root.iterdir())
+    assert len(output_entries) == 1
+    assert output_entries[0].name.startswith("test-output__")
+
+
+def test_archive_recreate_shared_output(tmp_path):
+    """Creating a new instance with same name creates a fresh shared output dir."""
+    cfg = _config(str(tmp_path))
+    Instance.create("test-reout", cfg).archive(cfg)
+
+    # New instance with same name
+    inst2 = Instance.create("test-reout", cfg)
+    shared_root = cfg.resolve_instances_dir() / "output"
+    assert (shared_root / "test-reout").is_dir()
+
+    # Archive again — both new and old output dirs coexist
+    inst2.archive(cfg)
+    entries = sorted(shared_root.iterdir())
+    assert len(entries) == 2
+    assert all(e.name.startswith("test-reout__") for e in entries)
+
+
+import shutil
+
+import pytest
+
+from ns_hpc.job_manager import JobStatus
+
+_skip_no_bwrap = pytest.mark.skipif(
+    not shutil.which("bwrap"), reason="bwrap not available"
+)
+
+
+@_skip_no_bwrap
+def test_archive_with_running_job_blocked(tmp_path, monkeypatch):
+    """Archiving an instance with running jobs raises RuntimeError."""
+    from ns_hpc.job_manager import JobManager
+    from ns_hpc.config import load_config
+
+    config_path = Path(tmp_path) / "config.toml"
+    config_path.write_text(f"""
+instances_dir = "{tmp_path}"
+
+[namespace_defaults]
+bind_ro = ["/usr", "/bin", "/lib", "/lib64"]
+workspace_mount = "/workspace"
+flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+
+[proxied_mcps]
+
+[resource_defaults]
+context_dirs = ["config/context"]
+resource_patterns = ["*.md"]
+""")
+    monkeypatch.setenv("NS_HPC_CONFIG", str(config_path))
+    cfg = load_config(str(config_path))
+
+    inst = Instance.create("test-block", cfg)
+    mgr = JobManager(inst, cfg)
+    result = mgr.submit("sleep 30", timeout=1, tail=5)
+    assert result.status == JobStatus.RUNNING
+
+    with pytest.raises(RuntimeError, match="still running"):
+        inst.archive(cfg)
+
+    # Cancel so cleanup doesn't leave a runaway
+    mgr.cancel(result.job_id)
+
+    # Now archive should succeed
+    assert inst.archive(cfg) is True

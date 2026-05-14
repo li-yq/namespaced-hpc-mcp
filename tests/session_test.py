@@ -565,14 +565,14 @@ async def main():
     suffix = int(time.time())
     inst = Instance.create(f"local-{suffix}", cfg)
     await run_local(log, inst, cfg)
-    Instance.destroy(f"local-{suffix}", cfg)
-    log.ok("instance destroyed")
+    inst.archive(cfg)
+    log.ok("instance archived")
 
     log.heading("Slurm timing scenarios")
     slurm_inst = Instance.create(f"slurm-{suffix}", cfg)
     await run_slurm(log, slurm_inst, cfg)
-    Instance.destroy(f"slurm-{suffix}", cfg)
-    log.ok("instance destroyed")
+    slurm_inst.archive(cfg)
+    log.ok("instance archived")
 
     fails = log.print_summary()
     print()

@@ -100,11 +100,30 @@ args = ["/"]
 context_dirs = ["~/.local/ns-hpc/context"]
 resource_patterns = ["*.md"]
 
+[resources]
+use_systemd = false
+
+[resources.cpus]
+limit = 4
+
+[resources.memory]
+limit = "8G"
+
 [slurm]
 partition = "cpu"
 default_cpus = 1
 default_memory_gb = 4
 default_timeout = 3600
+
+[slurm.resources.cpus]
+parameter = "--cpus-per-task={}"
+default = 1
+max = 8
+
+[slurm.resources.memory]
+parameter = "--mem={}"
+default = "4G"
+max = "32G"
 
 instances_dir = "/home/testuser/.local/share/ns-hpc/instances"
 TOML

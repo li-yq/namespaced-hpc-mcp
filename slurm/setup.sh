@@ -19,7 +19,7 @@ cd "$(dirname "$0")"  # slurm/
 
 HPC_HOME="${HPC_HOME:-/home/testuser/.local/ns-hpc}"
 VENV="$HPC_HOME/venv"
-CONFIG="$HPC_HOME/config.toml"
+CONFIG="${XDG_CONFIG_HOME:-/home/testuser/.config}/ns-hpc/config.toml"
 NS_HPC_BIN="/usr/local/bin/ns-hpc"
 
 # ── 1. Tear down ──────────────────────────────────────────────────────────
@@ -76,6 +76,7 @@ podman exec slurm-slurmctld \
 
 # ── 6. Create config.toml ─────────────────────────────────────────────────
 echo "=== Creating config ==="
+podman exec slurm-slurmctld mkdir -p "$(dirname "$CONFIG")"
 podman exec --user testuser -w /home/testuser slurm-slurmctld \
     mkdir -p "$HPC_HOME" "$HPC_HOME/context"
 # Copy context markdown files into the slurm config's context directory
@@ -151,6 +152,7 @@ echo "Venv:       $VENV"
 echo "Instances:  /home/testuser/.local/share/ns-hpc/instances"
 echo ""
 echo "Activate:   source $HPC_HOME/activate.sh"
+echo "           (sets NS_HPC_CONFIG and adds ns-hpc to PATH)"
 echo ""
 echo "Inspect:    npx @modelcontextprotocol/inspector \\"
 echo "              podman exec --user testuser -w /home/testuser -i slurm-slurmctld $NS_HPC_BIN run"

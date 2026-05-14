@@ -1,28 +1,85 @@
+# ── ns-hpc Configuration ─────────────────────────────────────────────────────
+#
+# This file serves as a reference.  Uncommented values are the defaults.
+# Uncomment and change to override.
+
+# ── Instance storage ─────────────────────────────────────────────────────────
+# Directory where sandbox instances are stored.  ${HOME} and ~ are expanded.
+# instances_dir = "${HOME}/.local/share/ns-hpc/instances"
+
+# ── bwrap namespace defaults ─────────────────────────────────────────────────
 [namespace_defaults]
-flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+# Read-only system paths bind-mounted into every sandbox.
 bind_ro = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]
+# Mount point for the per-instance writable workspace.
 workspace_mount = "/workspace"
+# Mount point for the shared output directory (inter-instance file exchange).
+# output_mount = "/output"
+# File descriptor used for bwrap --json-status-fd (job completion tracking).
+# status_fd = 3
+# Extra bwrap flags passed to every sandbox.
+flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+
+# ── Proxied MCP servers ──────────────────────────────────────────────────────
+# Each entry runs an external MCP server inside the bwrap sandbox.
+# The tool is exposed to clients as "{name}__{remote_tool_name}".
+#
+# [proxied_mcps.filesystem]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/"]
+#
+# Pre-installed variant (npm install -g @modelcontextprotocol/server-filesystem):
+# [proxied_mcps.filesystem]
+# command = "mcp-server-filesystem"
+# args = ["/"]
+#
+# Example: custom MCP server with env vars
+# [proxied_mcps.my-custom]
+# command = "uvx"
+# args = ["my-mcp-server"]
+# env = {TOKEN = "sekret"}
 
 [proxied_mcps.filesystem]
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/"]
 
+# ── Context resources ────────────────────────────────────────────────────────
 [resource_defaults]
+# Directories scanned for resource files (relative paths resolve from the
+# config file's parent directory; ~ is expanded).
+# context_dirs = ["config/context"]
 context_dirs = ["context"]
-resource_patterns = ["*.md"]
+# File patterns matched when registering resources.
+# resource_patterns = ["*.md"]
+
+# ── Local resource limits (cgroup v2 via systemd-run) ────────────────────────
+[resources]
+# Use systemd-run --scope for cgroup CPU/memory limits.
+# Set to false on systems without systemd (containers, WSL2).
+# use_systemd = true
 
 [resources.cpus]
-limit = 4
+# CPU quota as a fixed upper bound (applied as CPUQuota= in systemd-run).
+# limit = 4
 
 [resources.memory]
-limit = "8G"
+# Memory limit as a fixed upper bound (applied as MemoryMax= in systemd-run).
+# Supports K, M, G, T and Ki, Mi, Gi, Ti suffixes.
+# limit = "8G"
 
+# ── Slurm batch submission ───────────────────────────────────────────────────
 [slurm]
+# Default Slurm partition.
+# partition = "debug"
 partition = "cpu"
-default_cpus = 1
-default_memory_gb = 4
-default_timeout = 3600
+# Default CPUs (also used when slurm.resources.{}.default is unset).
+# default_cpus = 1
+# Default memory in GB (also used when slurm.resources.{}.default is unset).
+# default_memory_gb = 4
+# Default timeout in seconds.
+# default_timeout = 3600
 
+# Per-resource sbatch parameter templates.
 [slurm.resources.cpus]
 parameter = "--cpus-per-task={}"
 default = 1
@@ -32,3 +89,14 @@ max = 8
 parameter = "--mem={}"
 default = "4G"
 max = "32G"
+
+# Example: adding a GPU resource
+# [slurm.resources.gpus]
+# parameter = "--gres=gpu:{}"
+# default = 0
+# max = 8
+
+# ── Job execution ────────────────────────────────────────────────────────────
+# [job]
+# Verify running jobs via /proc after server restart (liveness check).
+# proc_check = true

@@ -139,13 +139,9 @@ def _default_config() -> Config:
 
 
 def _load_toml(path: Path) -> dict:
-    """Load a TOML file and return the raw dict. Returns {} on error."""
-    try:
-        raw = path.read_bytes()
-        return tomli.loads(raw.decode())
-    except FileNotFoundError as e:
-        logger.warning("failed to load config %s: %s", path, e)
-        return {}
+    """Load a TOML file and return the raw dict."""
+    raw = path.read_bytes()
+    return tomli.loads(raw.decode())
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -200,7 +196,11 @@ def load_config(path: str | Path | None = None) -> Config:
     # 2. Apply user-level config (XDG_CONFIG_HOME)
     user_config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "ns-hpc" / "config.toml"
     if user_config.exists():
-        data = _load_toml(user_config)
+        try:
+            data = _load_toml(user_config)
+        except (tomli.TOMLDecodeError, OSError) as e:
+            logger.warning("failed to load user config %s: %s", user_config, e)
+            data = {}
         _warn_unknown_keys(data, Config)
         config_dict = _deep_merge(config_dict, data)
 
@@ -210,7 +210,11 @@ def load_config(path: str | Path | None = None) -> Config:
     if path is not None:
         p = Path(path)
         if p.exists():
-            data = _load_toml(p)
+            try:
+                data = _load_toml(p)
+            except (tomli.TOMLDecodeError, OSError) as e:
+                logger.warning("failed to load config %s: %s", p, e)
+                data = {}
             _warn_unknown_keys(data, Config)
             config_dict = _deep_merge(config_dict, data)
         else:

@@ -8,6 +8,7 @@ def build_bwrap_args(
     working_dir: str | None = None,
     extra_ro_binds: list[tuple[str, str]] | None = None,
     extra_rw_binds: list[tuple[str, str]] | None = None,
+    extra_tmpfs: list[str] | None = None,
     extra_bwrap_flags: list[str] | None = None,
     config: Config | None = None,
 ) -> list[str]:
@@ -17,6 +18,11 @@ def build_bwrap_args(
     args = ["bwrap"]
     args.extend(config.namespace_defaults.flags)
 
+    # Sandbox tmpfs before any binds so explicit binds can overlay
+    if extra_tmpfs:
+        for mount_point in extra_tmpfs:
+            args.extend(["--tmpfs", mount_point])
+
     for host_path in config.namespace_defaults.bind_ro:
         args.extend(["--ro-bind", host_path, host_path])
 
@@ -25,7 +31,10 @@ def build_bwrap_args(
             args.extend(["--ro-bind", host, dest])
 
     workspace_mount = workspace_mount or config.namespace_defaults.workspace_mount
-    args.extend(["--bind", workspace_host_path, workspace_mount])
+    if workspace_host_path:
+        args.extend(["--bind", workspace_host_path, workspace_mount])
+    else:
+        args.extend(["--tmpfs", workspace_mount])
 
     if extra_rw_binds:
         for host, dest in extra_rw_binds:

@@ -6,6 +6,7 @@ instance and connected via stdio.  Tools are discovered at server startup
 calls a proxied tool with an ``instance_id``, the proxy starts the MCP server
 inside that instance's sandbox and forwards the call.
 """
+
 from __future__ import annotations
 
 import logging
@@ -18,14 +19,22 @@ from fastmcp.client.transports import StdioTransport
 from mcp.types import TextContent, Tool
 
 from ns_hpc.config import Config, ProxiedMCP
+from ns_hpc.namespace import build_bwrap_args
 
 logger = logging.getLogger("ns-hpc")
 
 
-def _build_bwrap_cmd(instance_id: str, command: str, args: list[str] | None) -> list[str]:
+def _build_bwrap_cmd(
+    instance_id: str, command: str, args: list[str] | None
+) -> list[str]:
     """Build argv for ``python -m ns_hpc bwrap <id> -- <command> <args>``."""
     return [
-        sys.executable, "-m", "ns_hpc", "bwrap", instance_id, "--",
+        sys.executable,
+        "-m",
+        "ns_hpc",
+        "bwrap",
+        instance_id,
+        "--",
         command,
         *(args or []),
     ]
@@ -42,21 +51,13 @@ async def discover_tools(cfg: ProxiedMCP, config: Config) -> list[Tool]:
     env = {**os.environ, **(cfg.env or {})} if cfg.env else None
     ns = config.namespace_defaults
 
-    bargs = ["bwrap"]
-    bargs.extend(ns.flags)
-
-    # Empty sandbox — tmpfs instead of real instance directories
-    bargs.extend(["--tmpfs", ns.workspace_mount])
-    bargs.extend(["--tmpfs", "/output"])
-    bargs.extend(["--tmpfs", "/home"])
-
-    # Explicit bind_ro overlays sandbox defaults
-    for host_path in ns.bind_ro:
-        bargs.extend(["--ro-bind", host_path, host_path])
-
-    bargs.extend(["--chdir", ns.workspace_mount])
-    bargs.append("--")
-    bargs.extend(command)
+    bargs = build_bwrap_args(
+        command=command,
+        workspace_host_path="",
+        workspace_mount=ns.workspace_mount,
+        config=config,
+        extra_tmpfs=[ns.output_mount],
+    )
 
     transport = StdioTransport(
         command=bargs[0],
@@ -105,7 +106,9 @@ class ProxiedMCPClient:
         client = await self.ensure_connected()
         return await client.list_tools()
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> list[TextContent]:
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any]
+    ) -> list[TextContent]:
         client = await self.ensure_connected()
         return await client.call_tool(name, arguments)
 
@@ -125,7 +128,10 @@ class ProxyManager:
         self._clients: dict[str, dict[str, ProxiedMCPClient]] = {}
 
     def get_or_start(
-        self, proxy_name: str, instance_id: str, cfg: ProxiedMCP,
+        self,
+        proxy_name: str,
+        instance_id: str,
+        cfg: ProxiedMCP,
     ) -> ProxiedMCPClient:
         """Return an existing client for *proxy_name*/*instance_id* or create one."""
         by_instance = self._clients.setdefault(proxy_name, {})

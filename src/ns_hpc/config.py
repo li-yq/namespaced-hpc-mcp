@@ -48,6 +48,7 @@ class NamespaceDefaults(BaseModel):
     bind_ro: list[str]
     workspace_mount: str
     flags: list[str]
+    output_mount: str = "/output"
     status_fd: int = 3
 
 

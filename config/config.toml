@@ -1,7 +1,8 @@
 [namespace_defaults]
+flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
 bind_ro = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]
 workspace_mount = "/workspace"
-flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+output_mount = "/output"
 status_fd = 3
 
 [proxied_mcps.filesystem]

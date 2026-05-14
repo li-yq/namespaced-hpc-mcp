@@ -213,6 +213,33 @@ async def list_instances(input: ListInstancesInput, ctx: Context) -> str:
     return "\n".join(lines)
 
 
+class ListArchivedInstancesInput(BaseModel):
+    """Input for the list_archived_instances tool."""
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def list_archived_instances(input: ListArchivedInstancesInput, ctx: Context) -> str:
+    """List all archived sandbox instances."""
+    context: ServerContext = ctx.lifespan_context
+
+    archived = Instance.list_archived_instances(context.config)
+    if not archived:
+        return "No archived instances found."
+
+    lines = []
+    for entry in archived:
+        label = f"{entry['instance_id']:20s}"
+        if entry["archived_at"]:
+            label += f"  archived: {entry['archived_at'][:19]}"
+        if entry["created_at"]:
+            label += f"  created: {entry['created_at'][:19]}"
+        if entry["description"]:
+            label += f"  [{entry['description'][:50]}]"
+        lines.append(label)
+
+    return "\n".join(lines)
+
+
 class DestroyInstanceInput(BaseModel):
     """Input for the destroy_instance tool."""
     instance_id: str = Field(
@@ -223,16 +250,20 @@ class DestroyInstanceInput(BaseModel):
 
 @mcp.tool(annotations={"destructiveHint": True})
 async def destroy_instance(input: DestroyInstanceInput, ctx: Context) -> str:
-    """Destroy a sandbox instance and remove its workspace directory."""
+    """Archive a sandbox instance, disabling new job submissions."""
     context: ServerContext = ctx.lifespan_context
 
-    if not Instance.load(input.instance_id, context.config):
+    instance = Instance.load(input.instance_id, context.config)
+    if instance is None:
         raise ToolError(f"Instance '{input.instance_id}' not found")
 
     context.job_managers.pop(input.instance_id, None)
     await context.proxy_manager.stop_all(input.instance_id)
-    Instance.destroy(input.instance_id, context.config)
-    return f"Instance '{input.instance_id}' destroyed."
+    try:
+        instance.archive(context.config)
+    except RuntimeError as e:
+        raise ToolError(str(e))
+    return f"Instance '{input.instance_id}' archived."
 
 
 class UpdateInstanceInput(BaseModel):

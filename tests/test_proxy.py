@@ -44,7 +44,7 @@ def bwrap_config(tmp_path: Path) -> Config:
             ],
             workspace_mount="/workspace",
             flags=[
-                "--unshare-all", "--share-net", "--die-with-parent",
+                "--unshare-all", "--share-net",
                 "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
             ],
         ),

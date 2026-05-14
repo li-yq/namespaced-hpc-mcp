@@ -12,7 +12,7 @@ def _config(tmp_dir: str) -> Config:
         namespace_defaults=NamespaceDefaults(
             bind_ro=["/usr", "/bin"],
             workspace_mount="/workspace",
-            flags=["--unshare-all", "--share-net", "--die-with-parent"],
+            flags=["--unshare-all", "--share-net"],
         ),
         proxied_mcps={},
         resource_defaults=ResourceDefaults(),

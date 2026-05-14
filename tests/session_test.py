@@ -156,9 +156,10 @@ async def s_timeout_kill(log: SessionLog, mgr: JobManager) -> None:
     """Long job with short timeout + no-detach → TIMEOUT with partial output."""
     log.subheading("Timeout + kill — short timeout, job killed, partial tail")
     r = mgr.submit(_SEQ_CMD, timeout=3, tail=3)
-    # Simulate the MCP layer's no-detach handling (cancel_and_tail)
+    # Simulate the MCP layer's no-detach handling
     if r.status == JobStatus.RUNNING:
-        mgr.cancel_and_tail(r, tail=3)
+        mgr.cancel(r.job_id)
+        r = mgr.poll(r.job_id, tail=3)
     log.log_result("submit seq timeout=3 (killed)", r)
     assert r.status == JobStatus.CANCELLED, f"expected CANCELLED, got {r.status}"
     assert r.exit_code is None

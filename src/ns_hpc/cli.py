@@ -226,7 +226,8 @@ def run(
 
     # Handle detach
     if result.status == JobStatus.RUNNING and not detach:
-        mgr.cancel_and_tail(result, tail)
+        mgr.cancel(result.job_id)
+        result = mgr.poll(result.job_id, tail=tail)
 
     # Audit outcome
     if result.status == JobStatus.RUNNING:
@@ -271,7 +272,8 @@ def status(
         raise typer.Exit(code=1)
 
     if result.status == JobStatus.RUNNING and not detach and timeout > 0:
-        mgr.cancel_and_tail(result, tail)
+        mgr.cancel(result.job_id)
+        result = mgr.poll(result.job_id, tail=tail)
 
     # Audit outcome
     if result.status == JobStatus.RUNNING:

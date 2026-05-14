@@ -1,7 +1,9 @@
 """Job manager — async job lifecycle with on-disk persistence.
 
 Every job writes stdout/stderr directly to disk files via shell redirect.
-Job state is persisted to a JSON file so it survives process restarts.
+Job state is persisted in per-job JSON files (``.ns_hpc_jobs/{job_id}.state``)
+so it survives process restarts.  Per-job files avoid the read-modify-write
+race of a single shared file under concurrent job completion.
 """
 from __future__ import annotations
 
@@ -125,7 +127,7 @@ class JobManager:
 
     Each job runs inside a bwrap sandbox (via ``ns-hpc bwrap`` CLI).
     stdout/stderr are redirected directly to disk files via shell redirect.
-    Job state is persisted to a JSON file for survival across restarts.
+    Job state is persisted to per-job files for survival across restarts.
     """
 
     def __init__(self, instance: Instance, config: Config):
@@ -133,31 +135,51 @@ class JobManager:
         self.config = config
         # In-memory subprocess handles for local (running) jobs
         self._procs: dict[str, subprocess.Popen] = {}
-        # Disk-persisted job metadata
-        self._jobs_path = instance.base_dir / ".ns_hpc_jobs.json"
+        # Disk-persisted job metadata — per-job files under .ns_hpc_jobs/
+        self._jobs_dir = instance.base_dir / ".ns_hpc_jobs"
         self._jobs = self._load_jobs()
         self._fixup_stale_jobs()
 
     # ── Persistence ──────────────────────────────────────────────────────
 
     def _load_jobs(self) -> dict[str, dict]:
-        """Load job metadata from disk. Returns {} on any error."""
+        """Load all per-job state files from ``_jobs_dir``.  Returns {} on error."""
+        jobs: dict[str, dict] = {}
         try:
-            if self._jobs_path.exists():
-                return json.loads(self._jobs_path.read_text())
-        except (json.JSONDecodeError, OSError):
+            if not self._jobs_dir.exists():
+                return jobs
+            for f in self._jobs_dir.iterdir():
+                if f.suffix != ".state":
+                    continue
+                try:
+                    data = json.loads(f.read_text())
+                    if "created_at" in data:
+                        jobs[f.stem] = data
+                except (json.JSONDecodeError, OSError):
+                    continue
+        except OSError:
             pass
-        return {}
+        return jobs
 
-    def _save_jobs(self) -> None:
-        """Atomically write job metadata to disk."""
-        # TODO: replace single-file write with per-job files to avoid
-        # read-modify-write races under concurrent job completion
-        # and to enable cross-process visibility.
-        self._jobs_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._jobs_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._jobs, indent=2))
-        os.replace(tmp, self._jobs_path)
+    def _state_path(self, job_id: str) -> Path:
+        return self._jobs_dir / f"{job_id}.state"
+
+    def _save_job(self, job_id: str) -> None:
+        """Atomically write one job's state file."""
+        entry = self._jobs.get(job_id)
+        if entry is None:
+            return
+        self._jobs_dir.mkdir(parents=True, exist_ok=True)
+        tmp = self._state_path(job_id).with_suffix(".tmp")
+        tmp.write_text(json.dumps(entry, indent=2))
+        os.replace(tmp, self._state_path(job_id))
+
+    def _remove_job(self, job_id: str) -> None:
+        """Remove one job's state file."""
+        try:
+            self._state_path(job_id).unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def _fixup_stale_jobs(self) -> None:
         """After restart, reconcile local jobs via status files.
@@ -171,11 +193,11 @@ class JobManager:
         * Otherwise mark the job ``FAILED`` — the bwrap process is
           gone and the kernel has torn down the namespace.
         """
-        changed = False
+        changed: list[str] = []
         cfg = self.config
         status_fd = cfg.namespace_defaults.status_fd
 
-        for entry in self._jobs.values():
+        for job_id, entry in self._jobs.items():
             if entry.get("mode") != "local" or entry.get("status") != "running":
                 continue
 
@@ -184,7 +206,7 @@ class JobManager:
                 if finished:
                     entry["status"] = "completed" if exit_code == 0 else "failed"
                     entry["exit_code"] = exit_code
-                    changed = True
+                    changed.append(job_id)
                 elif (
                     cfg.job.proc_check
                     and self._is_bwrap_alive(entry.get("pid", -1), status_fd, entry["status_path"])
@@ -192,13 +214,13 @@ class JobManager:
                     pass  # still legitimately running
                 else:
                     entry["status"] = "failed"
-                    changed = True
+                    changed.append(job_id)
             else:
                 entry["status"] = "unknown"
-                changed = True
+                changed.append(job_id)
 
-        if changed:
-            self._save_jobs()
+        for job_id in changed:
+            self._save_job(job_id)
 
     # ── Job ID & output dir ──────────────────────────────────────────────
 
@@ -341,7 +363,7 @@ class JobManager:
         status_fd = self.config.namespace_defaults.status_fd
 
         # exec so the outer bwrap reuses proc.pid (comm="bwrap"), making
-        # _is_bwrap_alive work and --die-with-parent cascade reliably:
+        # _is_bwrap_alive work:
         #   sh -c exec python ... bwrap → os.execvp → bwrap (outer, proc.pid)
         #                                                   └─ bwrap (inner, child-pid)
         shell_cmd = (
@@ -378,7 +400,7 @@ class JobManager:
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         self._procs[job_id] = proc
-        self._save_jobs()
+        self._save_job(job_id)
 
     def _submit_slurm(
         self,
@@ -421,13 +443,17 @@ class JobManager:
                 except (ValueError, TypeError):
                     # Non-integer — try memory comparison
                     if isinstance(value, str) and isinstance(spec_max, str):
-                        try:
-                            if parse_memory(value) > parse_memory(spec_max):
-                                raise ValueError(
-                                    f"Slurm resource '{name}' value {value} exceeds maximum {spec_max}"
-                                )
-                        except ValueError:
-                            pass
+                        v_bytes = parse_memory(value)
+                        m_bytes = parse_memory(spec_max)
+                        if v_bytes > m_bytes:
+                            raise ValueError(
+                                f"Slurm resource '{name}' value {value} exceeds maximum {spec_max}"
+                            )
+                    else:
+                        raise ValueError(
+                            f"Slurm resource '{name}' value {value!r} (type={type(value).__name__}) "
+                            f"cannot be compared against maximum {spec_max!r}"
+                        )
                 sbatch_args.append(spec.parameter.format(value))
 
         try:
@@ -451,7 +477,7 @@ class JobManager:
             "status_path": str(status_path),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        self._save_jobs()
+        self._save_job(job_id)
 
     # ── Poll ─────────────────────────────────────────────────────────────
 
@@ -561,7 +587,7 @@ class JobManager:
             entry["duration"] = round(
                 (datetime.fromisoformat(entry["finished_at"]) - created).total_seconds(), 2
             )
-            self._save_jobs()
+            self._save_job(job_id)
             return self._result_from_entry(job_id, entry, tail)
 
         return JobResult(
@@ -632,7 +658,7 @@ class JobManager:
                 entry["exit_code"] = ec if ec is not None else 0
                 entry["finished_at"] = datetime.now(timezone.utc).isoformat()
                 entry["duration"] = round(self._duration_since_created(entry), 2)
-                self._save_jobs()
+                self._save_job(job_id)
                 return JobResult(
                     job_id=job_id, status=JobStatus.COMPLETED,
                     exit_code=ec if ec is not None else 0,
@@ -652,7 +678,7 @@ class JobManager:
                 entry["exit_code"] = ec if ec is not None else -1
                 entry["finished_at"] = datetime.now(timezone.utc).isoformat()
                 entry["duration"] = round(self._duration_since_created(entry), 2)
-                self._save_jobs()
+                self._save_job(job_id)
                 return_code = ec if ec is not None else -1
                 message = f"job failed with exit code {return_code}" if return_code != -1 else "job failed"
                 return JobResult(
@@ -675,7 +701,7 @@ class JobManager:
                 entry["exit_code"] = ec if ec is not None else -1
                 entry["finished_at"] = datetime.now(timezone.utc).isoformat()
                 entry["duration"] = round(self._duration_since_created(entry), 2)
-                self._save_jobs()
+                self._save_job(job_id)
                 return JobResult(
                     job_id=job_id, status=JobStatus.CANCELLED,
                     exit_code=ec if ec is not None else -1,
@@ -755,31 +781,13 @@ class JobManager:
                 subprocess.run(["scancel", str(slurm_job_id)], timeout=15)
 
         entry["status"] = "cancelled"
-        self._save_jobs()
+        self._save_job(job_id)
         return True
-
-    def cancel_and_tail(self, result: JobResult, tail: int = 50) -> None:
-        """Cancel a running job and set status to CANCELLED with output tail.
-
-        .. note::
-
-           Known issue: ``result.stdout_path`` at this point is a
-           *container-side* path (translated by ``_container_path``), but
-           ``_tail_file`` expects a *host-side* path.  The tail output will
-           therefore be empty after this call.  The proper fix is to integrate
-           the detach-flag into ``submit()`` / ``poll()`` where host-side
-           paths are available.  Deferred — see also `_save_jobs` TODO.
-        """
-        self.cancel(result.job_id)
-        result.stdout_tail = _tail_file(Path(result.stdout_path), tail)
-        result.stderr_tail = _tail_file(Path(result.stderr_path), tail)
-        result.status = JobStatus.CANCELLED
-        result.message = "job was cancelled due to timeout"
 
     def list_jobs(self) -> list[dict]:
         """List all tracked jobs from disk-persisted state."""
         result = []
-        changed = False
+        changed: list[str] = []
 
         for job_id, entry in self._jobs.items():
             status = entry.get("status", "unknown")
@@ -791,7 +799,7 @@ class JobManager:
                     status = "completed" if exit_code == 0 else "failed"
                     entry["status"] = status
                     entry["exit_code"] = exit_code
-                    changed = True
+                    changed.append(job_id)
 
             result.append({
                 "job_id": job_id,
@@ -801,6 +809,6 @@ class JobManager:
                 "created_at": entry.get("created_at", ""),
             })
 
-        if changed:
-            self._save_jobs()
+        for job_id in changed:
+            self._save_job(job_id)
         return result

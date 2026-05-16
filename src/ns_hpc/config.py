@@ -89,6 +89,7 @@ class SlurmConfig(BaseModel):
 class JobConfig(BaseModel):
     """Job execution and recovery settings."""
     proc_check: bool = True
+    max_timeout: int = 3600
 
 
 class Config(BaseModel):

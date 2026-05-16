@@ -17,6 +17,15 @@ instance_app = typer.Typer()
 app.add_typer(instance_app, name="instance", help="Manage sandbox instances.")
 
 
+def _cap_timeout(timeout: int) -> tuple[int, str]:
+    """Cap *timeout* at config.job.max_timeout and return ``(capped, msg)``."""
+    cfg = load_config()
+    cap = cfg.job.max_timeout
+    if timeout > cap:
+        return cap, f"timeout capped to {cap}s by server max_timeout"
+    return timeout, ""
+
+
 @app.callback()
 def main(
     config: str | None = typer.Option(
@@ -219,6 +228,8 @@ def run(
         print(f"Error: instance '{instance_id}' not found.", file=sys.stderr)
         raise typer.Exit(code=1)
 
+    run_timeout, cap_msg = _cap_timeout(timeout)
+
     mgr = JobManager(inst, cfg)
     cmd_str = " ".join(command)
     mode_str = "slurm" if slurm else "local"
@@ -235,11 +246,11 @@ def run(
         except ValueError:
             parsed_resources[k] = v
 
-    inst.audit("job.submitted", command=cmd_str, mode=mode_str, timeout=timeout)
+    inst.audit("job.submitted", command=cmd_str, mode=mode_str, timeout=run_timeout)
     result = mgr.submit(
         cmd_str,
         mode=mode_str,
-        timeout=timeout,
+        timeout=run_timeout,
         tail=tail,
         slurm_resources=parsed_resources or None,
     )
@@ -252,7 +263,7 @@ def run(
     # Audit outcome
     if result.status == JobStatus.RUNNING:
         inst.audit("job.running", job_id=result.job_id, command=cmd_str,
-                   mode=mode_str, detached=True, timeout=timeout,
+                   mode=mode_str, detached=True, timeout=run_timeout,
                    stdout_path=result.stdout_path, stderr_path=result.stderr_path)
     else:
         inst.audit(f"job.{result.status.value}", job_id=result.job_id,
@@ -260,6 +271,8 @@ def run(
                    stdout_path=result.stdout_path, stderr_path=result.stderr_path)
 
     print(f"Job {result.job_id}: {result.status.value}")
+    if cap_msg:
+        print(f"Note: {cap_msg}")
     if result.exit_code is not None:
         print(f"Exit code: {result.exit_code}")
     print(f"stdout: {result.stdout_path}")
@@ -284,21 +297,23 @@ def status(
         print(f"Error: instance '{instance_id}' not found.", file=sys.stderr)
         raise typer.Exit(code=1)
 
+    poll_timeout, cap_msg = _cap_timeout(timeout)
+
     mgr = JobManager(inst, cfg)
-    result = mgr.poll(job_id, timeout=timeout, tail=tail)
+    result = mgr.poll(job_id, timeout=poll_timeout, tail=tail)
 
     if result is None:
         print(f"Job '{job_id}' not found or already finished.")
         raise typer.Exit(code=1)
 
-    if result.status == JobStatus.RUNNING and not detach and timeout > 0:
+    if result.status == JobStatus.RUNNING and not detach and poll_timeout > 0:
         mgr.cancel(result.job_id)
         result = mgr.poll(result.job_id, tail=tail)
 
     # Audit outcome
     if result.status == JobStatus.RUNNING:
         inst.audit("job.running", job_id=result.job_id,
-                   detached=bool(detach), poll_timeout=timeout,
+                   detached=bool(detach), poll_timeout=poll_timeout,
                    stdout_path=result.stdout_path, stderr_path=result.stderr_path)
     elif result.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
         inst.audit(f"job.{result.status.value}", job_id=result.job_id,
@@ -306,6 +321,8 @@ def status(
                    stdout_path=result.stdout_path, stderr_path=result.stderr_path)
 
     print(f"Job {result.job_id}: {result.status.value}")
+    if cap_msg:
+        print(f"Note: {cap_msg}")
     if result.exit_code is not None:
         print(f"Exit code: {result.exit_code}")
     print(f"stdout: {result.stdout_path}")

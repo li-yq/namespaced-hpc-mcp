@@ -331,6 +331,14 @@ class SubmitJobInput(BaseModel):
     )
 
 
+def _cap_timeout(timeout: int, config: Config) -> tuple[int, str]:
+    """Cap *timeout* at ``config.job.max_timeout`` and return ``(capped, msg)``."""
+    cap = config.job.max_timeout
+    if timeout > cap:
+        return cap, f"timeout capped to {cap}s by server max_timeout"
+    return timeout, ""
+
+
 @mcp.tool()
 async def submit_job(input: SubmitJobInput, ctx: Context) -> dict:
     """Submit a command as an async job.
@@ -351,13 +359,15 @@ async def submit_job(input: SubmitJobInput, ctx: Context) -> dict:
     if instance is None:
         raise ToolError(f"Instance '{input.instance_id}' not found")
 
+    timeout, cap_msg = _cap_timeout(input.timeout, config)
+
     mgr = _get_manager(ctx, instance)
     instance.audit("job.submitted", command=input.command, mode=input.mode,
-                   timeout=input.timeout)
+                   timeout=timeout)
     result = mgr.submit(
         input.command,
         mode=input.mode,
-        timeout=input.timeout,
+        timeout=timeout,
         tail=input.tail,
         slurm_resources=input.slurm_resources,
     )
@@ -371,7 +381,7 @@ async def submit_job(input: SubmitJobInput, ctx: Context) -> dict:
     if result.status == JobStatus.RUNNING:
         instance.audit("job.running", job_id=result.job_id,
                        command=input.command, mode=input.mode,
-                       detached=input.detach, timeout=input.timeout,
+                       detached=input.detach, timeout=timeout,
                        stdout_path=result.stdout_path, stderr_path=result.stderr_path)
     else:
         instance.audit(f"job.{result.status.value}", job_id=result.job_id,
@@ -379,7 +389,12 @@ async def submit_job(input: SubmitJobInput, ctx: Context) -> dict:
                        mode=input.mode,
                        stdout_path=result.stdout_path, stderr_path=result.stderr_path)
 
-    return result.to_dict()
+    d = result.to_dict()
+    if cap_msg:
+        d["timeout_capped"] = True
+        existing = d.get("message", "")
+        d["message"] = f"{cap_msg}. {existing}".strip() if existing else cap_msg
+    return d
 
 
 class PollJobInput(BaseModel):
@@ -415,8 +430,10 @@ async def poll_job(input: PollJobInput, ctx: Context) -> dict:
     if instance is None:
         raise ToolError(f"Instance '{input.instance_id}' not found")
 
+    timeout, cap_msg = _cap_timeout(input.timeout, config)
+
     mgr = _get_manager(ctx, instance)
-    result = mgr.poll(input.job_id, timeout=input.timeout, tail=input.tail)
+    result = mgr.poll(input.job_id, timeout=timeout, tail=input.tail)
 
     if result is None:
         raise ToolError(f"Job '{input.job_id}' not found or already finished")
@@ -428,14 +445,19 @@ async def poll_job(input: PollJobInput, ctx: Context) -> dict:
     # Audit outcome
     if result.status == JobStatus.RUNNING:
         instance.audit("job.running", job_id=result.job_id,
-                       detached=input.detach, poll_timeout=input.timeout,
+                       detached=input.detach, poll_timeout=timeout,
                        stdout_path=result.stdout_path, stderr_path=result.stderr_path)
     elif result.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
         instance.audit(f"job.{result.status.value}", job_id=result.job_id,
                        exit_code=result.exit_code,
                        stdout_path=result.stdout_path, stderr_path=result.stderr_path)
 
-    return result.to_dict()
+    d = result.to_dict()
+    if cap_msg:
+        d["timeout_capped"] = True
+        existing = d.get("message", "")
+        d["message"] = f"{cap_msg}. {existing}".strip() if existing else cap_msg
+    return d
 
 
 class ListJobsInput(BaseModel):

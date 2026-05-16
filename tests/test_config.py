@@ -33,6 +33,7 @@ def test_default_config_values():
     assert cfg.slurm.resources["cpus"].max == 8
     assert cfg.slurm.resources["memory"].default == "4G"
     assert cfg.slurm.resources["memory"].max == "32G"
+    assert cfg.job.max_timeout == 3600  # one hour
 
 
 def test_config_fallback_nonexistent_returns_user_or_defaults():

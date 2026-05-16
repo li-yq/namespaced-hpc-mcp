@@ -89,3 +89,6 @@ max = "32G"
 # [job]
 # Verify running jobs via /proc after server restart (liveness check).
 # proc_check = true
+# Hard limit for any job --timeout value.  Longer timeouts are silently capped
+# to this value and a "timeout_capped" flag is returned in the result.
+# max_timeout = 3600

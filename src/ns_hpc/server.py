@@ -16,6 +16,7 @@ from fastmcp.tools import FunctionTool
 from mcp.types import TextContent
 from pydantic import BaseModel, Field
 
+from ns_hpc import _enable_debug_logging
 from ns_hpc.config import Config, ProxiedMCP, load_config
 from ns_hpc.instance import Instance
 from ns_hpc.job_manager import JobManager, JobStatus
@@ -500,4 +501,5 @@ def run_server(config_path: str | None = None) -> None:
     Args:
         config_path: Optional override for the config.toml path.
     """
+    _enable_debug_logging()
     mcp.run(transport="stdio")

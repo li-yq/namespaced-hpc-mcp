@@ -5,6 +5,7 @@ import sys
 
 import typer
 
+from ns_hpc import _enable_debug_logging
 from ns_hpc.cli_impl import clean_instances, run_doctor
 from ns_hpc.config import load_config
 from ns_hpc.instance import Instance
@@ -25,6 +26,7 @@ def main(
     ),
 ) -> None:
     """ns-hpc — HPC sandboxing via bubblewrap."""
+    _enable_debug_logging()
     if config:
         os.environ["NS_HPC_CONFIG"] = config
 

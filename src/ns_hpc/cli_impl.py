@@ -1,10 +1,13 @@
 import json
+import logging
 import os
 import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+
+logger = logging.getLogger("ns-hpc")
 
 from ns_hpc.config import load_config
 from ns_hpc.instance import Instance
@@ -31,6 +34,7 @@ def run_doctor() -> None:
 
     # 2. Check unshare -r works
     try:
+        logger.debug("running: unshare -r -- true")
         r = subprocess.run(
             ["unshare", "-r", "--", "true"],
             capture_output=True,
@@ -102,6 +106,7 @@ def run_doctor() -> None:
     # 8. Smoke test bwrap --json-status-fd
     r_fd, w_fd = os.pipe()
     try:
+        logger.debug("running: bwrap smoke test (ro-bind /usr /bin /lib /lib64, proc, dev, tmpfs, unshare-all, share-net)")
         proc = subprocess.Popen(
             [
                 "bwrap",

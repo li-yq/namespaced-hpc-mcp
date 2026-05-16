@@ -8,6 +8,7 @@ race of a single shared file under concurrent job completion.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shlex
 import signal
@@ -20,6 +21,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger("ns-hpc")
 
 from ns_hpc.config import Config, parse_memory
 from ns_hpc.instance import Instance
@@ -384,8 +387,10 @@ class JobManager:
                 "-p", f"MemoryMax={memory}",
                 "--", "sh", "-c",
             ]
+            logger.debug("running: %s", shlex.join(runner + [shell_cmd]))
             proc = subprocess.Popen(runner + [shell_cmd])
         else:
+            logger.debug("running: sh -c %s", shell_cmd[:200])
             proc = subprocess.Popen(["sh", "-c", shell_cmd])
 
         self._jobs[job_id] = {
@@ -457,6 +462,7 @@ class JobManager:
                 sbatch_args.append(spec.parameter.format(value))
 
         try:
+            logger.debug("running: sbatch (wrapped command for job %s)", job_id)
             result = subprocess.run(
                 sbatch_args,
                 capture_output=True, text=True, timeout=30,
@@ -604,6 +610,7 @@ class JobManager:
     def _slurm_job_state(self, slurm_job_id: int) -> tuple[str, int | None]:
         """Query sacct and return (state, exit_code) for a Slurm job."""
         try:
+            logger.debug("running: sacct -j %s --json -X", slurm_job_id)
             result = subprocess.run(
                 ["sacct", "-j", str(slurm_job_id), "--json", "-X"],
                 capture_output=True, text=True, timeout=30,
@@ -778,6 +785,7 @@ class JobManager:
         else:
             slurm_job_id = entry.get("slurm_job_id")
             if slurm_job_id:
+                logger.debug("running: scancel %s", slurm_job_id)
                 subprocess.run(["scancel", str(slurm_job_id)], timeout=15)
 
         entry["status"] = "cancelled"

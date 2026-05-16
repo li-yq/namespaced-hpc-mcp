@@ -472,6 +472,9 @@ class JobManager:
         if result.returncode != 0:
             raise RuntimeError(f"sbatch failed: {result.stderr.strip()}")
 
+        # Wait briefly before polling — sacct may not reflect the job yet
+        time.sleep(2)
+
         self._jobs[job_id] = {
             "command": command,
             "mode": "slurm",
@@ -633,6 +636,7 @@ class JobManager:
             state = _parse_slurm_state(job)
             ec = _parse_slurm_exit_code(job)
             if state:
+                logger.debug("sacct %s state=%s exit_code=%s", slurm_job_id, state, ec)
                 return (state, ec)
 
         raise RuntimeError(f"slurm job {slurm_job_id} not found in sacct output")

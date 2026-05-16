@@ -768,7 +768,14 @@ class JobManager:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     proc.kill()
-                    proc.wait()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        logger.warning(
+                            "job %s: bwrap %d stuck even after SIGKILL (D state?), "
+                            "abandoning to keep MCP responsive",
+                            job_id, proc.pid,
+                        )
             elif proc is None and "status_path" in entry:
                 # No proc handle (recovery) — verify PID isn't reused,
                 # then send SIGTERM first.

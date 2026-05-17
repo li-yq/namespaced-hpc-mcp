@@ -3,22 +3,70 @@
 # This file serves as a reference.  Uncommented values are the defaults.
 # Uncomment and change to override.
 
-# ── Instance storage ─────────────────────────────────────────────────────────
+# ── Namespace sandbox defaults ───────────────────────────────────────────────
+[namespace]
 # Directory where sandbox instances are stored.  ${HOME} and ~ are expanded.
 # instances_dir = "${HOME}/.local/share/ns-hpc/instances"
 
-# ── bwrap namespace defaults ─────────────────────────────────────────────────
-[namespace_defaults]
-# Read-only system paths bind-mounted into every sandbox.
-bind_ro = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]
+# Base command for bwrap sandbox creation.  Additional arguments like
+# --bind (workspace), --chdir, --json-status-fd, and `<command>` are
+# appended dynamically at runtime.
+bwrap_command = [
+    "bwrap",
+    "--unshare-all", "--share-net",
+    "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+    "--ro-bind", "/usr", "/usr",
+    "--ro-bind", "/lib", "/lib",
+    "--ro-bind", "/lib64", "/lib64",
+    "--ro-bind", "/bin", "/bin",
+    "--ro-bind", "/sbin", "/sbin",
+    "--ro-bind", "/etc", "/etc",
+]
 # Mount point for the per-instance writable workspace.
-workspace_mount = "/workspace"
+# workspace_mount = "/workspace"
 # Mount point for the shared output directory (inter-instance file exchange).
 # output_mount = "/output"
 # File descriptor used for bwrap --json-status-fd (job completion tracking).
 # status_fd = 3
-# Extra bwrap flags passed to every sandbox.
-flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+
+# ── Job execution ────────────────────────────────────────────────────────────
+[jobs]
+# Hard limit for any job --timeout value.  Longer timeouts are silently capped
+# to this value and a "timeout_capped" flag is returned in the result.
+# max_timeout = 3600
+
+# Local (bwrap) execution with optional cgroup limits
+[jobs.local]
+# use_cgroups = true
+# Base command for systemd-run cgroup v2 resource limits.  Inner shell
+# command and script arguments are appended dynamically at runtime.
+cgroups_command = [
+    "systemd-run", "--user", "--scope",
+    "-p", "CPUQuota=400%",
+    "-p", "MemoryMax=8G",
+    "--",
+]
+# Verify running jobs via /proc after server restart (liveness check).
+# proc_check = true
+
+# Slurm batch submission
+[jobs.slurm]
+# Base command for sbatch submissions.  Flags containing ``{cpus}`` or
+# ``{memory}`` are substituted with resolved resource values at runtime.
+# Additional arguments (--wrap, --output, --error, --job-name) are
+# appended dynamically.
+sbatch_command = [
+    "sbatch",
+    "--partition", "cpu",
+    "--cpus-per-task={cpus}",
+    "--mem={memory}M",
+    # "--gres=gpu:{gpus}",
+]
+# Resource limits and defaults (integers only).
+[jobs.slurm.limit]
+cpus = { default = 1, max = 8 }
+memory = { default = 4096, max = 32768 }
+# gpus = { default = 0, max = 8 }
 
 # ── Proxied MCP servers ──────────────────────────────────────────────────────
 # Each entry runs an external MCP server inside the bwrap sandbox.
@@ -44,51 +92,10 @@ command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/"]
 
 # ── Context resources ────────────────────────────────────────────────────────
-[resource_defaults]
+[resource]
 # Directories scanned for resource files (relative paths resolve from the
 # config file's parent directory; ~ is expanded).
 # context_dirs = ["config/context"]
 context_dirs = ["context"]
 # File patterns matched when registering resources.
 # resource_patterns = ["*.md"]
-
-# ── Local resource limits (cgroup v2 via systemd-run) ────────────────────────
-[resources]
-# Use systemd-run --scope for cgroup CPU/memory limits.
-# Set to false on systems without systemd (containers, WSL2).
-# use_systemd = true
-# CPU quota as a fixed upper bound (applied as CPUQuota= in systemd-run).
-# cpus = 4
-# Memory limit (applied as MemoryMax=).  Supports K, M, G, T / Ki, Mi, Gi, Ti.
-# memory = "8G"
-
-# ── Slurm batch submission ───────────────────────────────────────────────────
-[slurm]
-# Default Slurm partition.
-# partition = "debug"
-partition = "cpu"
-
-# Per-resource sbatch parameter templates.
-[slurm.resources.cpus]
-parameter = "--cpus-per-task={}"
-default = 1
-max = 8
-
-[slurm.resources.memory]
-parameter = "--mem={}"
-default = "4G"
-max = "32G"
-
-# Example: adding a GPU resource
-# [slurm.resources.gpus]
-# parameter = "--gres=gpu:{}"
-# default = 0
-# max = 8
-
-# ── Job execution ────────────────────────────────────────────────────────────
-# [job]
-# Verify running jobs via /proc after server restart (liveness check).
-# proc_check = true
-# Hard limit for any job --timeout value.  Longer timeouts are silently capped
-# to this value and a "timeout_capped" flag is returned in the result.
-# max_timeout = 3600

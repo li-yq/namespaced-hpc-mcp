@@ -2,22 +2,42 @@
 
 import json
 import os
+import shutil
 from pathlib import Path
 
+import pytest
+
 from ns_hpc.instance import Instance
-from ns_hpc.config import Config, NamespaceDefaults, ResourceDefaults
+from ns_hpc.config import Config
+from ns_hpc.job_manager import JobStatus
+from ns_hpc.job_manager import JobManager
 
 
 def _config(tmp_dir: str) -> Config:
     return Config(
-        namespace_defaults=NamespaceDefaults(
-            bind_ro=["/usr", "/bin"],
-            workspace_mount="/workspace",
-            flags=["--unshare-all", "--share-net"],
-        ),
+        namespace={
+            "instances_dir": tmp_dir,
+            "bwrap_command": [
+                "bwrap",
+                "--unshare-all", "--share-net",
+                "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+                "--ro-bind", "/usr", "/usr",
+                "--ro-bind", "/bin", "/bin",
+                "--ro-bind", "/lib", "/lib",
+                "--ro-bind", "/lib64", "/lib64",
+            ],
+        },
+        jobs={
+            "local": {
+                "use_cgroups": False,
+                "cgroups_command": ["sh", "-c"],
+            },
+            "slurm": {
+                "sbatch_command": ["sbatch"],
+                "limit": {},
+            },
+        },
         proxied_mcps={},
-        resource_defaults=ResourceDefaults(),
-        instances_dir=tmp_dir,
     )
 
 
@@ -40,14 +60,12 @@ def test_create_instance(tmp_path):
 def test_create_duplicate(tmp_path):
     cfg = _config(str(tmp_path))
     Instance.create("test-dup", cfg)
-    import pytest
     with pytest.raises(FileExistsError):
         Instance.create("test-dup", cfg)
 
 
 def test_create_invalid_instance_id(tmp_path):
     cfg = _config(str(tmp_path))
-    import pytest
     with pytest.raises(ValueError, match="Invalid instance_id"):
         Instance.create("../evil", cfg)
 
@@ -294,12 +312,6 @@ def test_archive_recreate_shared_output(tmp_path):
     assert all(e.name.startswith("test-reout__") for e in entries)
 
 
-import shutil
-
-import pytest
-
-from ns_hpc.job_manager import JobStatus
-
 _skip_no_bwrap = pytest.mark.skipif(
     not shutil.which("bwrap"), reason="bwrap not available"
 )
@@ -314,19 +326,29 @@ async def test_archive_with_running_job_blocked(tmp_path, monkeypatch):
 
     config_path = Path(tmp_path) / "config.toml"
     config_path.write_text(f"""
+[namespace]
 instances_dir = "{tmp_path}"
+bwrap_command = [
+    "bwrap",
+    "--unshare-all", "--share-net",
+    "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+    "--ro-bind", "/usr", "/usr",
+    "--ro-bind", "/bin", "/bin",
+    "--ro-bind", "/lib", "/lib",
+    "--ro-bind", "/lib64", "/lib64",
+]
 
-[namespace_defaults]
-bind_ro = ["/usr", "/bin", "/lib", "/lib64"]
-workspace_mount = "/workspace"
-flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+[jobs.local]
+use_cgroups = false
+cgroups_command = []
 
-[resources]
-use_systemd = false
+[jobs.slurm]
+sbatch_command = ["sbatch"]
+[jobs.slurm.limit]
 
 [proxied_mcps]
 
-[resource_defaults]
+[resource]
 context_dirs = ["config/context"]
 resource_patterns = ["*.md"]
 """)

@@ -19,9 +19,9 @@ app.add_typer(instance_app, name="instance", help="Manage sandbox instances.")
 
 
 def _cap_timeout(timeout: int) -> tuple[int, str]:
-    """Cap *timeout* at config.job.max_timeout and return ``(capped, msg)``."""
+    """Cap *timeout* at config.jobs.max_timeout and return ``(capped, msg)``."""
     cfg = load_config()
-    cap = cfg.job.max_timeout
+    cap = cfg.jobs.max_timeout
     if timeout > cap:
         return cap, f"timeout capped to {cap}s by server max_timeout"
     return timeout, ""
@@ -101,7 +101,7 @@ def bwrap(
         print("Error: 'bwrap' not found on PATH. Is bubblewrap installed?", file=sys.stderr)
         raise typer.Exit(code=1)
 
-    fd = cfg.namespace_defaults.status_fd
+    fd = cfg.namespace.status_fd
     shared_output_root = cfg.resolve_instances_dir() / "output"
     argv = build_bwrap_args(
         command=list(command),
@@ -214,7 +214,7 @@ def run(
     tail: int = typer.Option(50, "--tail", help="Tail lines to show"),
     slurm_resource: list[str] = typer.Option(
         [], "--slurm-resource", "-r",
-        help="Slurm resource (key=value), repeatable (e.g. -r cpus=4 -r memory=8G)",
+        help="Slurm resource (key=value), repeatable (e.g. -r cpus=4 -r memory=8192)",
     ),
 ):
     """Run a command as an async job. Waits up to --timeout seconds.
@@ -234,8 +234,8 @@ def run(
     cmd_str = " ".join(command)
     mode_str = "slurm" if slurm else "local"
 
-    # Parse --slurm-resource key=value pairs into dict
-    parsed_resources: dict[str, int | str] = {}
+    # Parse --slurm-resource key=value pairs into dict (integers only)
+    parsed_resources: dict[str, int] = {}
     for r in slurm_resource:
         k, _, v = r.partition("=")
         if not k or not v:
@@ -244,7 +244,8 @@ def run(
         try:
             parsed_resources[k] = int(v)
         except ValueError:
-            parsed_resources[k] = v
+            print(f"Error: slurm resource values must be integers, got '{v}'", file=sys.stderr)
+            raise typer.Exit(code=1)
 
     async def _do_run():
         mgr = JobManager(inst, cfg)
@@ -348,12 +349,16 @@ def jobs_list(
         print(f"Error: instance '{instance_id}' not found.", file=sys.stderr)
         raise typer.Exit(code=1)
 
-    jobs = mgr.list_jobs()
-    if not jobs:
-        print("No running jobs.")
-        return
-    for j in jobs:
-        print(f"{j['job_id']:20s}  {j['status']:12s}  {j['command'][:60]}")
+    async def _do_list():
+        mgr = JobManager(inst, cfg)
+        jobs = mgr.list_jobs()
+        if not jobs:
+            print("No running jobs.")
+            return
+        for j in jobs:
+            print(f"{j['job_id']:20s}  {j['status']:12s}  {j['command'][:60]}")
+
+    asyncio.run(_do_list())
 
 
 @instance_app.command()
@@ -383,6 +388,7 @@ def cancel(
         return ok
 
     asyncio.run(_do_cancel())
+
 
 @instance_app.command()
 def archive(

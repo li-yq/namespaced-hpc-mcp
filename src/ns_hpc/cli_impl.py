@@ -23,6 +23,7 @@ def run_doctor() -> None:
     print("ns-hpc doctor")
     print()
 
+    cfg = load_config()
     all_ok = True
 
     # 1. Check bwrap exists
@@ -71,8 +72,11 @@ def run_doctor() -> None:
 
     # 5. Check configured bind paths exist
     try:
-        cfg = load_config()
-        bind_paths = cfg.namespace_defaults.bind_ro
+        bind_paths = []
+        cmd = cfg.namespace.bwrap_command
+        for i, arg in enumerate(cmd):
+            if arg == "--ro-bind" and i + 2 < len(cmd):
+                bind_paths.append(cmd[i + 1])  # host path is arg after --ro-bind
         all_bind_ok = True
         for p in bind_paths:
             exists = Path(p).exists()
@@ -103,26 +107,17 @@ def run_doctor() -> None:
     if not tmp_ok:
         all_ok = False
 
-    # 8. Smoke test bwrap --json-status-fd
+    # 8. Smoke test bwrap --json-status-fd using configured bwrap_command
     r_fd, w_fd = os.pipe()
     try:
-        logger.debug("running: bwrap smoke test (ro-bind /usr /bin /lib /lib64, proc, dev, tmpfs, unshare-all, share-net)")
+        logger.debug("running: bwrap smoke test (using configured bwrap_command)")
+        # Build the bwrap args from config, replacing the status fd and command
+        smoke_args = list(cfg.namespace.bwrap_command)
+        smoke_args.extend(["--json-status-fd", str(w_fd)])
+        smoke_args.extend(["--", "/bin/sh", "-c", "exit 0"])
+
         proc = subprocess.Popen(
-            [
-                "bwrap",
-                "--ro-bind", "/usr", "/usr",
-                "--ro-bind", "/bin", "/bin",
-                "--ro-bind", "/lib", "/lib",
-                "--ro-bind", "/lib64", "/lib64",
-                "--proc", "/proc",
-                "--dev", "/dev",
-                "--tmpfs", "/tmp",
-                "--unshare-all",
-                "--share-net",
-                "--json-status-fd", str(w_fd),
-                "--",
-                "/bin/sh", "-c", "exit 0",
-            ],
+            smoke_args,
             pass_fds=(w_fd,),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

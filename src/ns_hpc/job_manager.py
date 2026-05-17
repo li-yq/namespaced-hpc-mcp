@@ -24,7 +24,7 @@ from typing import Optional
 
 logger = logging.getLogger("ns-hpc")
 
-from ns_hpc.config import Config, parse_memory
+from ns_hpc.config import Config
 from ns_hpc.instance import Instance
 
 
@@ -119,10 +119,45 @@ def _container_path(host_path: str, instance: Instance, config: Config) -> str:
     If the path is outside the workspace dir it is returned unchanged.
     """
     ws_host = str(instance.workspace_dir)
-    ws_container = config.namespace_defaults.workspace_mount
+    ws_container = config.namespace.workspace_mount
     if host_path.startswith(ws_host):
         return host_path.replace(ws_host, ws_container, 1)
     return host_path
+
+
+def _resolve_slurm_resources(
+    config: Config,
+    overrides: dict[str, int] | None,
+) -> dict[str, int]:
+    """Resolve Slurm resource values from overrides or defaults, validating max bounds.
+
+    Returns a dict mapping resource name to resolved integer value.
+    Raises ``ValueError`` if an override exceeds the configured max.
+    """
+    limit = config.jobs.slurm.limit
+    resolved: dict[str, int] = {}
+
+    for name, spec in limit.items():
+        value = (overrides or {}).get(name, spec.default)
+        if not isinstance(value, int):
+            raise ValueError(
+                f"Slurm resource '{name}' must be an integer, got {value!r}"
+            )
+        if value > spec.max:
+            raise ValueError(
+                f"Slurm resource '{name}' value {value} exceeds maximum {spec.max}"
+            )
+        resolved[name] = value
+
+    # Reject unknown resource names in overrides
+    if overrides:
+        for name in overrides:
+            if name not in limit:
+                raise ValueError(
+                    f"unrecognized slurm resource '{name}'"
+                )
+
+    return resolved
 
 
 class JobManager:
@@ -190,7 +225,7 @@ class JobManager:
         When the status file shows ``exit-code`` the job is complete.
         When it shows ``child-pid`` but no ``exit-code``:
 
-        * If ``config.job.proc_check`` is enabled (default), verify
+        * If ``config.jobs.local.proc_check`` is enabled (default), verify
           whether the bwrap process is alive via ``/proc`` (guarding
           against PID reuse).  If alive the job keeps running.
         * Otherwise mark the job ``FAILED`` — the bwrap process is
@@ -198,7 +233,7 @@ class JobManager:
         """
         changed: list[str] = []
         cfg = self.config
-        status_fd = cfg.namespace_defaults.status_fd
+        status_fd = cfg.namespace.status_fd
 
         for job_id, entry in self._jobs.items():
             if entry.get("mode") != "local" or entry.get("status") != "running":
@@ -211,7 +246,7 @@ class JobManager:
                     entry["exit_code"] = exit_code
                     changed.append(job_id)
                 elif (
-                    cfg.job.proc_check
+                    cfg.jobs.local.proc_check
                     and self._is_bwrap_alive(entry.get("pid", -1), status_fd, entry["status_path"])
                 ):
                     pass  # still legitimately running
@@ -321,7 +356,7 @@ class JobManager:
         mode: str = "local",
         timeout: float = 60,
         tail: int = 50,
-        slurm_resources: dict[str, int | str] | None = None,
+        slurm_resources: dict[str, int] | None = None,
     ) -> JobResult:
         """Submit a job, then poll up to ``timeout`` seconds.
 
@@ -334,13 +369,13 @@ class JobManager:
             timeout: Max seconds to wait for completion.
             tail: Number of tail lines to return.
             slurm_resources: Per-job resource overrides for Slurm
-                (e.g. ``{"cpus": 4, "memory": "8G"}``).
+                (e.g. ``{"cpus": 4, "memory": 8192}`` — integers only).
         """
         if not command.strip():
             raise ValueError("command must not be empty")
         job_id = self._next_job_id()
         output_dir = self._ensure_output_dir()
-        status_fd = self.config.namespace_defaults.status_fd
+        status_fd = self.config.namespace.status_fd
         stdout_path = output_dir / f"{job_id}.out"
         stderr_path = output_dir / f"{job_id}.err"
         status_path = self._status_dir() / f"{job_id}.status"
@@ -363,7 +398,7 @@ class JobManager:
         status_path: Path,
     ) -> None:
         """Start a local bwrap job and persist its entry.  Does not wait."""
-        status_fd = self.config.namespace_defaults.status_fd
+        status_fd = self.config.namespace.status_fd
 
         # exec so the outer bwrap reuses proc.pid (comm="bwrap"), making
         # _is_bwrap_alive work:
@@ -377,21 +412,22 @@ class JobManager:
             f" {status_fd}>{shlex.quote(str(status_path))}"
         )
 
-        # Wrap with systemd-run for cgroup v2 resource limits (best-effort)
-        if self.config.resources.use_systemd:
-            cpus = self.config.resources.cpus
-            memory = parse_memory(self.config.resources.memory)
-            runner = [
-                "systemd-run", "--user", "--scope",
-                "-p", f"CPUQuota={cpus * 100}%",
-                "-p", f"MemoryMax={memory}",
-                "--", "sh", "-c",
-            ]
-            logger.debug("running: %s", repr(shlex.join(runner + [shell_cmd])))
-            proc = await asyncio.create_subprocess_exec(*runner, shell_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        # Use systemd-run for cgroup v2 resource limits if enabled
+        if self.config.jobs.local.use_cgroups:
+            runner = list(self.config.jobs.local.cgroups_command) + ["sh", "-c"]
+            logger.debug("running: %s ...", repr(shlex.join(runner + [shell_cmd[:80]])))
+            proc = await asyncio.create_subprocess_exec(
+                *runner, shell_cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
         else:
             logger.debug("running: sh -c %s", repr(shell_cmd[:200]))
-            proc = await asyncio.create_subprocess_exec("sh", "-c", shell_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            proc = await asyncio.create_subprocess_exec(
+                "sh", "-c", shell_cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
 
         self._jobs[job_id] = {
             "command": command,
@@ -414,52 +450,34 @@ class JobManager:
         stdout_path: Path,
         stderr_path: Path,
         status_path: Path,
-        slurm_resources: dict[str, int | str] | None = None,
+        slurm_resources: dict[str, int] | None = None,
     ) -> None:
         """Submit via sbatch and persist the entry.  Does not wait."""
-        status_fd = self.config.namespace_defaults.status_fd
+        status_fd = self.config.namespace.status_fd
         bwrap_cmd = (
             f"exec {sys.executable} -m ns_hpc bwrap {self.instance.id} -- "
             f"/bin/sh -c {shlex.quote(command)}"
             f" {status_fd}>{shlex.quote(str(status_path))}"
         )
 
-        # Build sbatch args with configured resource flags
-        sbatch_args = [
-            "sbatch",
+        # Resolve resource values with validation
+        resolved = _resolve_slurm_resources(self.config, slurm_resources)
+
+        # Build sbatch args from the base command with template substitution
+        sbatch_args = []
+        for elem in self.config.jobs.slurm.sbatch_command:
+            try:
+                formatted = elem.format(**resolved)
+            except KeyError:
+                formatted = elem
+            sbatch_args.append(formatted)
+
+        sbatch_args.extend([
             "--wrap", bwrap_cmd,
             "--output", str(stdout_path),
             "--error", str(stderr_path),
             "--job-name", f"ns-hpc-{job_id[:8]}",
-            "--partition", self.config.slurm.partition,
-        ]
-        for name, spec in self.config.slurm.resources.items():
-            value = (slurm_resources or {}).get(name, spec.default)
-            if value is not None:
-                # Validate against configured max
-                spec_max = spec.max
-                try:
-                    v_int = int(value) if not isinstance(value, int) else value
-                    m_int = int(spec_max) if not isinstance(spec_max, int) else spec_max
-                    if v_int > m_int:
-                        raise ValueError(
-                            f"Slurm resource '{name}' value {value} exceeds maximum {spec_max}"
-                        )
-                except (ValueError, TypeError):
-                    # Non-integer — try memory comparison
-                    if isinstance(value, str) and isinstance(spec_max, str):
-                        v_bytes = parse_memory(value)
-                        m_bytes = parse_memory(spec_max)
-                        if v_bytes > m_bytes:
-                            raise ValueError(
-                                f"Slurm resource '{name}' value {value} exceeds maximum {spec_max}"
-                            )
-                    else:
-                        raise ValueError(
-                            f"Slurm resource '{name}' value {value!r} (type={type(value).__name__}) "
-                            f"cannot be compared against maximum {spec_max!r}"
-                        )
-                sbatch_args.append(spec.parameter.format(value))
+        ])
 
         try:
             logger.debug("running: sbatch (wrapped command for job %s)", job_id)
@@ -571,7 +589,7 @@ class JobManager:
 
         # Recovery path: no process handle (server restart) — poll status file
         if timeout > 0 and proc is None:
-            status_fd = self.config.namespace_defaults.status_fd
+            status_fd = self.config.namespace.status_fd
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 finished, exit_code, _ = self._read_status_file(status_path)
@@ -801,7 +819,7 @@ class JobManager:
                 # No proc handle (recovery) — verify PID isn't reused,
                 # then send SIGTERM first.
                 pid = entry.get("pid")
-                status_fd = self.config.namespace_defaults.status_fd
+                status_fd = self.config.namespace.status_fd
                 if pid is not None and self._is_bwrap_alive(pid, status_fd, entry["status_path"]):
                     try:
                         os.kill(pid, signal.SIGTERM)

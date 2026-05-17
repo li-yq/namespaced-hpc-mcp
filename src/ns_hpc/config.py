@@ -9,49 +9,6 @@ import tomli
 
 logger = logging.getLogger("ns-hpc")
 
-# Memory suffix multipliers (for cgroup MemoryMax in bytes)
-_MEMORY_SUFFIXES: dict[str, int] = {
-    "K": 1024,
-    "M": 1024 ** 2,
-    "G": 1024 ** 3,
-    "T": 1024 ** 4,
-    "Ki": 1024,
-    "Mi": 1024 ** 2,
-    "Gi": 1024 ** 3,
-    "Ti": 1024 ** 4,
-}
-
-
-def parse_memory(value: str | int) -> int:
-    """Parse a memory string (e.g. ``"4G"``, ``"512M"``) into bytes.
-
-    Accepts suffixes: K, M, G, T, Ki, Mi, Gi, Ti (2^10 multipliers).
-    A bare integer is returned as-is.
-    """
-    if isinstance(value, int):
-        return value
-    value = value.strip()
-    if not value:
-        return 0
-    for suffix, multiplier in _MEMORY_SUFFIXES.items():
-        if value.endswith(suffix):
-            try:
-                return int(value[: -len(suffix)]) * multiplier
-            except ValueError:
-                raise ValueError(f"invalid memory value: {value!r}")
-    try:
-        return int(value)
-    except ValueError:
-        raise ValueError(f"invalid memory value: {value!r}")
-
-
-class NamespaceDefaults(BaseModel):
-    bind_ro: list[str]
-    workspace_mount: str
-    flags: list[str]
-    output_mount: str = "/output"
-    status_fd: int = 3
-
 
 class ProxiedMCP(BaseModel):
     command: str
@@ -59,59 +16,92 @@ class ProxiedMCP(BaseModel):
     env: dict[str, str] | None = None
 
 
-class ResourceDefaults(BaseModel):
-    context_dirs: list[str] = ["config/context"]
+class Namespace(BaseModel):
+    instances_dir: str = "${HOME}/.local/share/ns-hpc/instances"
+    bwrap_command: list[str]
+    workspace_mount: str = "/workspace"
+    output_mount: str = "/output"
+    status_fd: int = 3
+
+
+class JobLocal(BaseModel):
+    use_cgroups: bool = True
+    cgroups_command: list[str]
+    proc_check: bool = True
+
+
+class JobSlurmResource(BaseModel):
+    default: int
+    max: int
+
+
+class JobSlurm(BaseModel):
+    sbatch_command: list[str]
+    limit: dict[str, JobSlurmResource]
+
+
+class JobsConfig(BaseModel):
+    max_timeout: int = 3600
+    local: JobLocal
+    slurm: JobSlurm
+
+
+class ResourceConfig(BaseModel):
+    context_dirs: list[str] = ["context"]
     resource_patterns: list[str] = ["*.md"]
 
 
-class Resources(BaseModel):
-    """Local cgroup resource limits — fixed upper bounds."""
-    cpus: int = 4
-    memory: str = "8G"
-    use_systemd: bool = True
-
-
-class SlurmResource(BaseModel):
-    """A single Slurm sbatch parameter definition."""
-    parameter: str  # e.g. "--cpus-per-task={}", "--gres=gpu:{}"
-    default: int | str
-    max: int | str
-
-
-class SlurmConfig(BaseModel):
-    partition: str = "debug"
-    resources: dict[str, SlurmResource] = {
-        "cpus": SlurmResource(parameter="--cpus-per-task={}", default=1, max=8),
-        "memory": SlurmResource(parameter="--mem={}", default="4G", max="32G"),
-    }
-
-
-class JobConfig(BaseModel):
-    """Job execution and recovery settings."""
-    proc_check: bool = True
-    max_timeout: int = 3600
-
-
 class Config(BaseModel):
-    namespace_defaults: NamespaceDefaults
+    namespace: Namespace
+    jobs: JobsConfig
+    resource: ResourceConfig = ResourceConfig()
     proxied_mcps: dict[str, ProxiedMCP]
-    resource_defaults: ResourceDefaults
-    resources: Resources = Resources()
-    slurm: SlurmConfig = SlurmConfig()
-    job: JobConfig = JobConfig()
-    instances_dir: str = "${HOME}/.local/share/ns-hpc/instances"
 
     def resolve_instances_dir(self) -> Path:
-        resolved = os.path.expandvars(os.path.expanduser(self.instances_dir))
+        resolved = os.path.expandvars(os.path.expanduser(self.namespace.instances_dir))
         return Path(resolved).resolve()
 
 
 def _default_config() -> Config:
     return Config(
-        namespace_defaults=NamespaceDefaults(
-            bind_ro=["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"],
-            workspace_mount="/workspace",
-            flags=["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"],
+        namespace=Namespace(
+            bwrap_command=[
+                "bwrap",
+                "--unshare-all", "--share-net",
+                "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+                "--ro-bind", "/usr", "/usr",
+                "--ro-bind", "/lib", "/lib",
+                "--ro-bind", "/lib64", "/lib64",
+                "--ro-bind", "/bin", "/bin",
+                "--ro-bind", "/sbin", "/sbin",
+                "--ro-bind", "/etc", "/etc",
+            ],
+        ),
+        jobs=JobsConfig(
+            local=JobLocal(
+                cgroups_command=[
+                    "systemd-run", "--user", "--scope",
+                    "-p", "CPUQuota=400%",
+                    "-p", "MemoryMax=8G",
+                    "--",
+                ],
+            ),
+            slurm=JobSlurm(
+                sbatch_command=[
+                    "sbatch",
+                    "--partition", "cpu",
+                    "--cpus-per-task={cpus}",
+                    "--mem={memory}M",
+                ],
+                limit={
+                    "cpus": JobSlurmResource(default=1, max=8),
+                    "memory": JobSlurmResource(default=4096, max=32768),
+                },
+            ),
+        ),
+        resource=ResourceConfig(
+            context_dirs=["context"],
+            resource_patterns=["*.md"],
         ),
         proxied_mcps={
             "filesystem": ProxiedMCP(
@@ -119,12 +109,6 @@ def _default_config() -> Config:
                 args=["-y", "@modelcontextprotocol/server-filesystem", "/"],
             ),
         },
-        resource_defaults=ResourceDefaults(
-            context_dirs=["context"],
-            resource_patterns=["*.md"],
-        ),
-        resources=Resources(),
-        slurm=SlurmConfig(),
     )
 
 
@@ -163,7 +147,7 @@ def _warn_unknown_keys(data: dict, model_cls: type[BaseModel], prefix: str = "")
         val = data[key]
         if isinstance(val, dict):
             ft = model_cls.model_fields[key].annotation
-            # Directly nested Pydantic model (e.g. namespace_defaults → NamespaceDefaults)
+            # Directly nested Pydantic model
             if hasattr(ft, "model_fields"):
                 _warn_unknown_keys(val, ft, path)
             # dict[str, SomeModel] — check each entry's keys

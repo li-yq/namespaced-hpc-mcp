@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from ns_hpc.config import Config, NamespaceDefaults, ProxiedMCP, ResourceDefaults
+from ns_hpc.config import Config, ProxiedMCP
 from ns_hpc.proxy import discover_tools
 
 # Path to the test MCP server script
@@ -36,21 +36,30 @@ def proxy_cfg() -> ProxiedMCP:
 def bwrap_config(tmp_path: Path) -> Config:
     """Minimal config with venv and project root bound for bwrap."""
     return Config(
-        namespace_defaults=NamespaceDefaults(
-            bind_ro=[
-                "/usr", "/bin", "/lib", "/lib64",
-                str(_VENV_ROOT),
-                str(_PROJECT_ROOT),
-            ],
-            workspace_mount="/workspace",
-            flags=[
+        namespace={
+            "instances_dir": str(tmp_path),
+            "bwrap_command": [
+                "bwrap",
                 "--unshare-all", "--share-net",
                 "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+                "--ro-bind", "/usr", "/usr",
+                "--ro-bind", "/bin", "/bin",
+                "--ro-bind", "/lib", "/lib64",
+                "--ro-bind", str(_VENV_ROOT), str(_VENV_ROOT),
+                "--ro-bind", str(_PROJECT_ROOT), str(_PROJECT_ROOT),
             ],
-        ),
+        },
+        jobs={
+            "local": {
+                "use_cgroups": False,
+                "cgroups_command": ["sh", "-c"],
+            },
+            "slurm": {
+                "sbatch_command": ["sbatch"],
+                "limit": {},
+            },
+        },
         proxied_mcps={},
-        resource_defaults=ResourceDefaults(),
-        instances_dir=str(tmp_path),
     )
 
 

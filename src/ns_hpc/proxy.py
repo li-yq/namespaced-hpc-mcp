@@ -32,7 +32,7 @@ async def discover_tools(cfg: ProxiedMCP, config: Config) -> list[Tool]:
     """
     command = [cfg.command] + (cfg.args or [])
     env = {**os.environ, **(cfg.env or {})} if cfg.env else None
-    ns = config.namespace_defaults
+    ns = config.namespace
 
     bargs = build_bwrap_args(
         command=command,
@@ -82,7 +82,7 @@ class ProxiedMCPClient:
             raise ValueError(f"Instance '{self.instance_id}' not found")
 
         cmd = [self.cfg.command] + (self.cfg.args or [])
-        ns = self.config.namespace_defaults
+        ns = self.config.namespace
         shared_output_root = self.config.resolve_instances_dir() / "output"
         bargs = build_bwrap_args(
             command=cmd,

@@ -50,8 +50,8 @@ def _register_context_resources(server: FastMCP, config: Config, config_path: st
     so that the config is self-contained regardless of CWD.
     """
     config_dir = Path(config_path).resolve().parent if config_path else Path.cwd()
-    patterns = config.resource_defaults.resource_patterns
-    for raw_dir in config.resource_defaults.context_dirs:
+    patterns = config.resource.resource_patterns
+    for raw_dir in config.resource.context_dirs:
         d = Path(raw_dir).expanduser()
         if not d.is_absolute():
             d = config_dir / d
@@ -325,15 +325,15 @@ class SubmitJobInput(BaseModel):
         ge=0,
         le=1000,
     )
-    slurm_resources: dict[str, int | str] | None = Field(
+    slurm_resources: dict[str, int] | None = Field(
         default=None,
-        description="Per-job resource overrides for Slurm (e.g. {'cpus': 4})",
+        description="Per-job resource overrides for Slurm (e.g. {'cpus': 4, 'memory': 8192}) — integers only",
     )
 
 
 def _cap_timeout(timeout: int, config: Config) -> tuple[int, str]:
-    """Cap *timeout* at ``config.job.max_timeout`` and return ``(capped, msg)``."""
-    cap = config.job.max_timeout
+    """Cap *timeout* at ``config.jobs.max_timeout`` and return ``(capped, msg)``."""
+    cap = config.jobs.max_timeout
     if timeout > cap:
         return cap, f"timeout capped to {cap}s by server max_timeout"
     return timeout, ""

@@ -1,21 +1,37 @@
+"""Tests for the bwrap namespace / argument builder."""
+
 import tempfile
 
-from ns_hpc.config import Config, NamespaceDefaults, ResourceDefaults
+from ns_hpc.config import Config
 from ns_hpc.namespace import build_bwrap_args
 
 
 def default_config() -> Config:
     return Config(
-        namespace_defaults=NamespaceDefaults(
-            bind_ro=["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"],
-            workspace_mount="/workspace",
-            flags=["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"],
-        ),
+        namespace={
+            "bwrap_command": [
+                "bwrap",
+                "--unshare-all", "--share-net",
+                "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+                "--ro-bind", "/usr", "/usr",
+                "--ro-bind", "/lib", "/lib",
+                "--ro-bind", "/lib64", "/lib64",
+                "--ro-bind", "/bin", "/bin",
+                "--ro-bind", "/sbin", "/sbin",
+                "--ro-bind", "/etc", "/etc",
+            ],
+        },
+        jobs={
+            "local": {
+                "use_cgroups": False,
+                "cgroups_command": ["systemd-run", "--user", "--scope", "--"],
+            },
+            "slurm": {
+                "sbatch_command": ["sbatch"],
+                "limit": {},
+            },
+        },
         proxied_mcps={},
-        resource_defaults=ResourceDefaults(
-            context_dirs=["context"],
-            resource_patterns=["*.md"],
-        ),
     )
 
 
@@ -36,7 +52,8 @@ def test_build_bwrap_args_basic():
     assert "--tmpfs" in args
     assert "/tmp" in args
     assert "--ro-bind" in args
-    assert args.count("--ro-bind") == len(cfg.namespace_defaults.bind_ro)
+    # 6 default ro-binds
+    assert args.count("--ro-bind") == 6
     assert "--bind" in args
     assert tmpdir in args
     assert "/workspace" in args
@@ -61,11 +78,15 @@ def test_build_bwrap_args_extra_binds():
         )
 
     ro_idx = [i for i, a in enumerate(args) if a == "--ro-bind"]
-    # Default ro-binds + extra
-    assert len(ro_idx) == len(cfg.namespace_defaults.bind_ro) + 1
+    # Default ro-binds (from bwrap_command) + extra
+    assert len(ro_idx) == 6 + 1  # 6 default + 1 extra
+    # Find the extra bind — it's appended after the workspace bind
+    # So last --ro-bind entry should be our extra
     assert args[ro_idx[-1] + 1] == "/host/ro"
     assert args[ro_idx[-1] + 2] == "/container/ro"
 
+    # Find all --bind entries (workspace bind + extra rw bind)
     rw_idx = [i for i, a in enumerate(args) if a == "--bind"]
+    # Last --bind should be the extra_rw_bind
     assert args[rw_idx[-1] + 1] == "/host/rw"
     assert args[rw_idx[-1] + 2] == "/container/rw"

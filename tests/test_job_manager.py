@@ -12,23 +12,33 @@ from ns_hpc.job_manager import JobManager, JobStatus, _tail_file
 from ns_hpc.config import Config, load_config
 from ns_hpc.instance import Instance
 
-# TOML template matching the same values that the old inline Config builder used.
+# TOML template matching the new config structure.
 # Written to a temp file so subprocesses (ns-hpc bwrap) inherit NS_HPC_CONFIG
 # and can find test instances.
 _CONFIG_TOML = """\
+[namespace]
 instances_dir = "{instances_dir}"
+bwrap_command = [
+    "bwrap",
+    "--unshare-all", "--share-net",
+    "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+    "--ro-bind", "/usr", "/usr",
+    "--ro-bind", "/bin", "/bin",
+    "--ro-bind", "/lib", "/lib",
+    "--ro-bind", "/lib64", "/lib64",
+]
 
-[namespace_defaults]
-bind_ro = ["/usr", "/bin", "/lib", "/lib64"]
-workspace_mount = "/workspace"
-flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+[jobs.local]
+use_cgroups = false
+cgroups_command = []
 
-[resources]
-use_systemd = false
+[jobs.slurm]
+sbatch_command = ["sbatch"]
+[jobs.slurm.limit]
 
 [proxied_mcps]
 
-[resource_defaults]
+[resource]
 context_dirs = ["config/context"]
 resource_patterns = ["*.md"]
 """
@@ -113,10 +123,10 @@ async def test_submit_and_complete(tmp_path, monkeypatch):
     assert "hello_job" in result.stdout_tail
 
     # stdout_path is a container-side path — verify format
-    assert result.stdout_path.startswith(cfg.namespace_defaults.workspace_mount)
+    assert result.stdout_path.startswith(cfg.namespace.workspace_mount)
     # Also verify the host-side file exists (derive from workspace_dir)
     host_stdout = result.stdout_path.replace(
-        cfg.namespace_defaults.workspace_mount, str(inst.workspace_dir), 1
+        cfg.namespace.workspace_mount, str(inst.workspace_dir), 1
     )
     assert Path(host_stdout).exists()
     assert "hello_job" in Path(host_stdout).read_text()
@@ -144,9 +154,9 @@ async def test_submit_detach_timeout(tmp_path, monkeypatch):
     result = await mgr.submit("sleep 30 && echo done", timeout=2, tail=5)
     assert result.status == JobStatus.RUNNING, f"Expected RUNNING, got {result.status}"
     # stdout_path is container-side — derive host path for verification
-    assert result.stdout_path.startswith(cfg.namespace_defaults.workspace_mount)
+    assert result.stdout_path.startswith(cfg.namespace.workspace_mount)
     host_stdout = result.stdout_path.replace(
-        cfg.namespace_defaults.workspace_mount, str(inst.workspace_dir), 1
+        cfg.namespace.workspace_mount, str(inst.workspace_dir), 1
     )
     assert Path(host_stdout).exists()
 
@@ -230,7 +240,6 @@ async def test_submit_isolation(tmp_path, monkeypatch):
     )
     assert result.status == JobStatus.COMPLETED
     # /etc/passwd is --ro-bind mounted, so it's accessible
-    # But /tmp/host_secret should not be
     assert "EXPOSED" in result.stdout_tail or "SAFE" in result.stdout_tail
 
 

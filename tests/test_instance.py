@@ -306,7 +306,8 @@ _skip_no_bwrap = pytest.mark.skipif(
 
 
 @_skip_no_bwrap
-def test_archive_with_running_job_blocked(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_archive_with_running_job_blocked(tmp_path, monkeypatch):
     """Archiving an instance with running jobs raises RuntimeError."""
     from ns_hpc.job_manager import JobManager
     from ns_hpc.config import load_config
@@ -320,6 +321,9 @@ bind_ro = ["/usr", "/bin", "/lib", "/lib64"]
 workspace_mount = "/workspace"
 flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
 
+[resources]
+use_systemd = false
+
 [proxied_mcps]
 
 [resource_defaults]
@@ -331,14 +335,14 @@ resource_patterns = ["*.md"]
 
     inst = Instance.create("test-block", cfg)
     mgr = JobManager(inst, cfg)
-    result = mgr.submit("sleep 30", timeout=1, tail=5)
+    result = await mgr.submit("sleep 30", timeout=1, tail=5)
     assert result.status == JobStatus.RUNNING
 
     with pytest.raises(RuntimeError, match="still running"):
         inst.archive(cfg)
 
     # Cancel so cleanup doesn't leave a runaway
-    mgr.cancel(result.job_id)
+    await mgr.cancel(result.job_id)
 
     # Now archive should succeed
     assert inst.archive(cfg) is True

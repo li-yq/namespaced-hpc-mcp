@@ -12,10 +12,10 @@ import logging
 import os
 import shlex
 import signal
-import subprocess
 import sys
 import time
 import uuid
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -137,7 +137,7 @@ class JobManager:
         self.instance = instance
         self.config = config
         # In-memory subprocess handles for local (running) jobs
-        self._procs: dict[str, subprocess.Popen] = {}
+        self._procs: dict[str, asyncio.subprocess.Process] = {}
         # Disk-persisted job metadata — per-job files under .ns_hpc_jobs/
         self._jobs_dir = instance.base_dir / ".ns_hpc_jobs"
         self._jobs = self._load_jobs()
@@ -314,7 +314,7 @@ class JobManager:
 
     # ── Submit ───────────────────────────────────────────────────────────
 
-    def submit(
+    async def submit(
         self,
         command: str,
         *,
@@ -346,15 +346,15 @@ class JobManager:
         status_path = self._status_dir() / f"{job_id}.status"
 
         if mode == "local":
-            self._submit_local(job_id, command, stdout_path, stderr_path, status_path)
+            await self._submit_local(job_id, command, stdout_path, stderr_path, status_path)
         elif mode == "slurm":
-            self._submit_slurm(job_id, command, stdout_path, stderr_path, status_path, slurm_resources)
+            await self._submit_slurm(job_id, command, stdout_path, stderr_path, status_path, slurm_resources)
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
-        return self.poll(job_id, timeout=timeout, tail=tail)
+        return await self.poll(job_id, timeout=timeout, tail=tail)
 
-    def _submit_local(
+    async def _submit_local(
         self,
         job_id: str,
         command: str,
@@ -388,10 +388,10 @@ class JobManager:
                 "--", "sh", "-c",
             ]
             logger.debug("running: %s", shlex.join(runner + [shell_cmd]))
-            proc = subprocess.Popen(runner + [shell_cmd])
+            proc = await asyncio.create_subprocess_exec(*runner, shell_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         else:
             logger.debug("running: sh -c %s", shell_cmd[:200])
-            proc = subprocess.Popen(["sh", "-c", shell_cmd])
+            proc = await asyncio.create_subprocess_exec("sh", "-c", shell_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
 
         self._jobs[job_id] = {
             "command": command,
@@ -407,7 +407,7 @@ class JobManager:
         self._procs[job_id] = proc
         self._save_job(job_id)
 
-    def _submit_slurm(
+    async def _submit_slurm(
         self,
         job_id: str,
         command: str,
@@ -463,24 +463,34 @@ class JobManager:
 
         try:
             logger.debug("running: sbatch (wrapped command for job %s)", job_id)
-            result = subprocess.run(
-                sbatch_args,
-                capture_output=True, text=True, timeout=30,
+            proc = await asyncio.create_subprocess_exec(
+                *sbatch_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(), timeout=30,
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise RuntimeError("sbatch timed out")
         except FileNotFoundError:
             raise RuntimeError("slurm scheduler is not available")
-        if result.returncode != 0:
-            raise RuntimeError(f"sbatch failed: {result.stderr.strip()}")
+        if proc.returncode != 0:
+            stderr_text = stderr_bytes.decode(errors="replace").strip() if stderr_bytes else ""
+            raise RuntimeError(f"sbatch failed: {stderr_text}")
 
-        # Wait briefly before polling — sacct may not reflect the job yet
-        time.sleep(2)
+        stdout_text = stdout_bytes.decode(errors="replace").strip()
+        await asyncio.sleep(2)
 
         self._jobs[job_id] = {
             "command": command,
             "mode": "slurm",
             "status": "running",
             "pid": None,
-            "slurm_job_id": int(result.stdout.strip().split()[-1]),
+            "slurm_job_id": int(stdout_text.split()[-1]),
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
             "status_path": str(status_path),
@@ -490,7 +500,7 @@ class JobManager:
 
     # ── Poll ─────────────────────────────────────────────────────────────
 
-    def poll(
+    async def poll(
         self,
         job_id: str,
         *,
@@ -511,8 +521,8 @@ class JobManager:
             return self._result_from_entry(job_id, entry, tail)
 
         if entry["mode"] == "local":
-            return self._poll_local(job_id, entry, timeout, tail)
-        return self._poll_slurm(job_id, entry, timeout, tail)
+            return await self._poll_local(job_id, entry, timeout, tail)
+        return await self._poll_slurm(job_id, entry, timeout, tail)
 
     def _result_from_entry(self, job_id: str, entry: dict, tail: int) -> JobResult:
         """Build a JobResult from a persisted entry (already finished)."""
@@ -540,7 +550,7 @@ class JobManager:
             duration=duration,
         )
 
-    def _poll_local(
+    async def _poll_local(
         self,
         job_id: str,
         entry: dict,
@@ -553,10 +563,10 @@ class JobManager:
         status_path: Path = Path(entry["status_path"])
 
         # Wait up to timeout if we have a process handle
-        if timeout > 0 and proc is not None and proc.poll() is None:
+        if timeout > 0 and proc is not None and proc.returncode is None:
             try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
+                await asyncio.wait_for(proc.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
                 pass
 
         # Recovery path: no process handle (server restart) — poll status file
@@ -573,14 +583,14 @@ class JobManager:
                     exit_code = -1
                     finished = True
                     break
-                time.sleep(0.2)
+                await asyncio.sleep(0.2)
             if not finished:
                 finished, exit_code, _ = self._read_status_file(status_path)
         else:
             # Normal path: read the status file once
             finished, exit_code, _ = self._read_status_file(status_path)
 
-        if not finished and proc and proc.poll() is not None:
+        if not finished and proc and proc.returncode is not None:
             # Process gone but status file didn't flush — use proc returncode
             exit_code = proc.returncode
             finished = True
@@ -589,9 +599,12 @@ class JobManager:
             self._procs.pop(job_id, None)
             entry["status"] = "completed" if exit_code == 0 else "failed"
             entry["exit_code"] = exit_code
-            entry["finished_at"] = datetime.fromtimestamp(
-                status_path.stat().st_mtime, tz=timezone.utc
-            ).isoformat()
+            if status_path.exists():
+                entry["finished_at"] = datetime.fromtimestamp(
+                    status_path.stat().st_mtime, tz=timezone.utc
+                ).isoformat()
+            else:
+                entry["finished_at"] = datetime.now(timezone.utc).isoformat()
             created = datetime.fromisoformat(entry["created_at"])
             entry["duration"] = round(
                 (datetime.fromisoformat(entry["finished_at"]) - created).total_seconds(), 2
@@ -610,24 +623,32 @@ class JobManager:
             duration=self._duration_since_created(entry),
         )
 
-    def _slurm_job_state(self, slurm_job_id: int) -> tuple[str, int | None]:
+    async def _slurm_job_state(self, slurm_job_id: int) -> tuple[str, int | None]:
         """Query sacct and return (state, exit_code) for a Slurm job."""
         try:
             logger.debug("running: sacct -j %s --json -X", slurm_job_id)
-            result = subprocess.run(
-                ["sacct", "-j", str(slurm_job_id), "--json", "-X"],
-                capture_output=True, text=True, timeout=30,
+            proc = await asyncio.create_subprocess_exec(
+                "sacct", "-j", str(slurm_job_id), "--json", "-X",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(), timeout=30,
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise RuntimeError("slurm query timed out")
         except FileNotFoundError:
             raise RuntimeError("slurm scheduler is not available")
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("slurm query timed out")
 
-        if result.returncode != 0:
-            raise RuntimeError("slurm query failed")
+        if proc.returncode != 0:
+            stderr_text = stderr_bytes.decode(errors="replace").strip() if stderr_bytes else ""
+            raise RuntimeError(f"slurm query failed: {stderr_text}")
 
         try:
-            data = json.loads(result.stdout)
+            data = json.loads(stdout_bytes.decode(errors="replace"))
             jobs = data.get("jobs", [])
         except (json.JSONDecodeError, TypeError):
             jobs = []
@@ -641,7 +662,7 @@ class JobManager:
 
         raise RuntimeError(f"slurm job {slurm_job_id} not found in sacct output")
 
-    def _poll_slurm(
+    async def _poll_slurm(
         self,
         job_id: str,
         entry: dict,
@@ -658,7 +679,7 @@ class JobManager:
         deadline = time.monotonic() + timeout if timeout > 0 else None
 
         while True:
-            state, ec = self._slurm_job_state(slurm_job_id)
+            state, ec = await self._slurm_job_state(slurm_job_id)
 
             if state in ("COMPLETED",):
                 # Prefer exit code from status file (more precise than sacct)
@@ -745,9 +766,9 @@ class JobManager:
                 )
 
             # sleep between sacct queries — slurmdbd warns against tight polling loops
-            time.sleep(5)
+            await asyncio.sleep(5)
 
-    def cancel(self, job_id: str) -> bool:
+    async def cancel(self, job_id: str) -> bool:
         """Cancel a running job.  Returns True if cancelled."""
         entry = self._jobs.get(job_id)
         if entry is None:
@@ -759,18 +780,18 @@ class JobManager:
 
         if entry["mode"] == "local":
             proc = self._procs.pop(job_id, None)
-            if proc and proc.poll() is None:
+            if proc and proc.returncode is None:
                 # Send SIGTERM first so the inner command can clean up.
                 # Killing the outer bwrap triggers the kernel to tear
                 # down the namespace, killing all processes inside.
                 proc.terminate()
                 try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except asyncio.TimeoutError:
                     proc.kill()
                     try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
+                        await asyncio.wait_for(proc.wait(), timeout=5)
+                    except asyncio.TimeoutError:
                         logger.warning(
                             "job %s: bwrap %d stuck even after SIGKILL (D state?), "
                             "abandoning to keep MCP responsive",
@@ -788,7 +809,7 @@ class JobManager:
                         while time.monotonic() < deadline:
                             if not Path(f"/proc/{pid}").exists():
                                 break
-                            time.sleep(0.2)
+                            await asyncio.sleep(0.2)
                         else:
                             os.kill(pid, signal.SIGKILL)
                     except OSError:
@@ -797,7 +818,16 @@ class JobManager:
             slurm_job_id = entry.get("slurm_job_id")
             if slurm_job_id:
                 logger.debug("running: scancel %s", slurm_job_id)
-                subprocess.run(["scancel", str(slurm_job_id)], timeout=15)
+                proc = await asyncio.create_subprocess_exec(
+                    "scancel", str(slurm_job_id),
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=15)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
 
         entry["status"] = "cancelled"
         self._save_job(job_id)

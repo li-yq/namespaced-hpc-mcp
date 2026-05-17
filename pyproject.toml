@@ -23,3 +23,7 @@ dev = [
 
 [project.scripts]
 ns-hpc = "ns_hpc.cli:app"
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
+

@@ -341,11 +341,11 @@ def _cap_timeout(timeout: int, config: Config) -> tuple[int, str]:
 
 @mcp.tool()
 async def submit_job(input: SubmitJobInput, ctx: Context) -> dict:
-    """Submit a command as an async job.
+    """Submit a command as an async (non-blocking) job.
 
-    The job runs inside a bwrap sandbox.  stdout/stderr are written
-    directly to disk files.  The tool waits up to ``timeout`` seconds,
-    then either returns the result (completed) or a running state.
+    Uses asyncio under the hood — the MCP server stays responsive even
+    during long-running commands.  stdout/stderr are written directly
+    to disk files.
 
     When ``detach=True`` (default): if the job exceeds timeout, it keeps
     running in the background.  Use ``poll_job`` to check on it later.
@@ -364,7 +364,9 @@ async def submit_job(input: SubmitJobInput, ctx: Context) -> dict:
     mgr = _get_manager(ctx, instance)
     instance.audit("job.submitted", command=input.command, mode=input.mode,
                    timeout=timeout)
-    result = mgr.submit(
+
+    # Use the async API so the event loop stays responsive
+    result = await mgr.submit(
         input.command,
         mode=input.mode,
         timeout=timeout,
@@ -374,8 +376,8 @@ async def submit_job(input: SubmitJobInput, ctx: Context) -> dict:
 
     # Handle detach: if still running after timeout, kill it
     if result.status == JobStatus.RUNNING and not input.detach:
-        mgr.cancel(result.job_id)
-        result = mgr.poll(result.job_id, tail=input.tail)
+        await mgr.cancel(result.job_id)
+        result = await mgr.poll(result.job_id, tail=input.tail)
 
     # Audit outcome
     if result.status == JobStatus.RUNNING:
@@ -422,6 +424,7 @@ class PollJobInput(BaseModel):
 async def poll_job(input: PollJobInput, ctx: Context) -> dict:
     """Poll a running job.  Optionally wait for completion.
 
+    Uses asyncio under the hood — the MCP server stays responsive.
     Same timeout/detach semantics as submit_job.
     """
     config: Config = ctx.lifespan_context.config
@@ -433,14 +436,14 @@ async def poll_job(input: PollJobInput, ctx: Context) -> dict:
     timeout, cap_msg = _cap_timeout(input.timeout, config)
 
     mgr = _get_manager(ctx, instance)
-    result = mgr.poll(input.job_id, timeout=timeout, tail=input.tail)
+    result = await mgr.poll(input.job_id, timeout=timeout, tail=input.tail)
 
     if result is None:
         raise ToolError(f"Job '{input.job_id}' not found or already finished")
 
     if result.status == JobStatus.RUNNING and not input.detach:
-        mgr.cancel(input.job_id)
-        result = mgr.poll(input.job_id, tail=input.tail)
+        await mgr.cancel(input.job_id)
+        result = await mgr.poll(input.job_id, tail=input.tail)
 
     # Audit outcome
     if result.status == JobStatus.RUNNING:
@@ -492,6 +495,7 @@ class CancelJobInput(BaseModel):
 async def cancel_job(input: CancelJobInput, ctx: Context) -> dict:
     """Cancel a running job and return its final status and output tail.
 
+    Uses asyncio under the hood — the MCP server stays responsive.
     Safe to call on already-finished jobs (no-op, returns current status).
     """
     config: Config = ctx.lifespan_context.config
@@ -501,12 +505,12 @@ async def cancel_job(input: CancelJobInput, ctx: Context) -> dict:
         raise ToolError(f"Instance '{input.instance_id}' not found")
 
     mgr = _get_manager(ctx, instance)
-    ok = mgr.cancel(input.job_id)
+    ok = await mgr.cancel(input.job_id)
     if ok:
         instance.audit("job.cancelled", job_id=input.job_id)
 
     # Poll after cancel to capture final exit code and tail output
-    result = mgr.poll(input.job_id, tail=input.tail)
+    result = await mgr.poll(input.job_id, tail=input.tail)
     if result is not None:
         return result.to_dict()
     return {"job_id": input.job_id, "cancelled": ok}

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import shutil
@@ -230,7 +231,6 @@ def run(
 
     run_timeout, cap_msg = _cap_timeout(timeout)
 
-    mgr = JobManager(inst, cfg)
     cmd_str = " ".join(command)
     mode_str = "slurm" if slurm else "local"
 
@@ -246,40 +246,44 @@ def run(
         except ValueError:
             parsed_resources[k] = v
 
-    inst.audit("job.submitted", command=cmd_str, mode=mode_str, timeout=run_timeout)
-    result = mgr.submit(
-        cmd_str,
-        mode=mode_str,
-        timeout=run_timeout,
-        tail=tail,
-        slurm_resources=parsed_resources or None,
-    )
+    async def _do_run():
+        mgr = JobManager(inst, cfg)
+        result = await mgr.submit(
+            cmd_str,
+            mode=mode_str,
+            timeout=run_timeout,
+            tail=tail,
+            slurm_resources=parsed_resources or None,
+        )
 
-    # Handle detach
-    if result.status == JobStatus.RUNNING and not detach:
-        mgr.cancel(result.job_id)
-        result = mgr.poll(result.job_id, tail=tail)
+        # Handle detach
+        if result.status == JobStatus.RUNNING and not detach:
+            await mgr.cancel(result.job_id)
+            result = await mgr.poll(result.job_id, tail=tail)
 
-    # Audit outcome
-    if result.status == JobStatus.RUNNING:
-        inst.audit("job.running", job_id=result.job_id, command=cmd_str,
-                   mode=mode_str, detached=True, timeout=run_timeout,
-                   stdout_path=result.stdout_path, stderr_path=result.stderr_path)
-    else:
-        inst.audit(f"job.{result.status.value}", job_id=result.job_id,
-                   exit_code=result.exit_code, command=cmd_str, mode=mode_str,
-                   stdout_path=result.stdout_path, stderr_path=result.stderr_path)
+        # Audit outcome
+        if result.status == JobStatus.RUNNING:
+            inst.audit("job.running", job_id=result.job_id, command=cmd_str,
+                       mode=mode_str, detached=True, timeout=run_timeout,
+                       stdout_path=result.stdout_path, stderr_path=result.stderr_path)
+        else:
+            inst.audit(f"job.{result.status.value}", job_id=result.job_id,
+                       exit_code=result.exit_code, command=cmd_str, mode=mode_str,
+                       stdout_path=result.stdout_path, stderr_path=result.stderr_path)
 
-    print(f"Job {result.job_id}: {result.status.value}")
-    if cap_msg:
-        print(f"Note: {cap_msg}")
-    if result.exit_code is not None:
-        print(f"Exit code: {result.exit_code}")
-    print(f"stdout: {result.stdout_path}")
-    print(f"stderr: {result.stderr_path}")
+        print(f"Job {result.job_id}: {result.status.value}")
+        if cap_msg:
+            print(f"Note: {cap_msg}")
+        if result.exit_code is not None:
+            print(f"Exit code: {result.exit_code}")
+        print(f"stdout: {result.stdout_path}")
+        print(f"stderr: {result.stderr_path}")
 
-    if result.status == JobStatus.FAILED:
-        raise typer.Exit(code=result.exit_code or 1)
+        if result.status == JobStatus.FAILED:
+            raise typer.Exit(code=result.exit_code or 1)
+        return result
+
+    asyncio.run(_do_run())
 
 
 @instance_app.command()
@@ -299,34 +303,38 @@ def status(
 
     poll_timeout, cap_msg = _cap_timeout(timeout)
 
-    mgr = JobManager(inst, cfg)
-    result = mgr.poll(job_id, timeout=poll_timeout, tail=tail)
+    async def _do_status():
+        mgr = JobManager(inst, cfg)
+        result = await mgr.poll(job_id, timeout=poll_timeout, tail=tail)
 
-    if result is None:
-        print(f"Job '{job_id}' not found or already finished.")
-        raise typer.Exit(code=1)
+        if result is None:
+            print(f"Job '{job_id}' not found or already finished.")
+            raise typer.Exit(code=1)
 
-    if result.status == JobStatus.RUNNING and not detach and poll_timeout > 0:
-        mgr.cancel(result.job_id)
-        result = mgr.poll(result.job_id, tail=tail)
+        if result.status == JobStatus.RUNNING and not detach and poll_timeout > 0:
+            await mgr.cancel(result.job_id)
+            result = await mgr.poll(result.job_id, tail=tail)
 
-    # Audit outcome
-    if result.status == JobStatus.RUNNING:
-        inst.audit("job.running", job_id=result.job_id,
-                   detached=bool(detach), poll_timeout=poll_timeout,
-                   stdout_path=result.stdout_path, stderr_path=result.stderr_path)
-    elif result.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
-        inst.audit(f"job.{result.status.value}", job_id=result.job_id,
-                   exit_code=result.exit_code,
-                   stdout_path=result.stdout_path, stderr_path=result.stderr_path)
+        # Audit outcome
+        if result.status == JobStatus.RUNNING:
+            inst.audit("job.running", job_id=result.job_id,
+                       detached=bool(detach), poll_timeout=poll_timeout,
+                       stdout_path=result.stdout_path, stderr_path=result.stderr_path)
+        elif result.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+            inst.audit(f"job.{result.status.value}", job_id=result.job_id,
+                       exit_code=result.exit_code,
+                       stdout_path=result.stdout_path, stderr_path=result.stderr_path)
 
-    print(f"Job {result.job_id}: {result.status.value}")
-    if cap_msg:
-        print(f"Note: {cap_msg}")
-    if result.exit_code is not None:
-        print(f"Exit code: {result.exit_code}")
-    print(f"stdout: {result.stdout_path}")
-    print(f"stderr: {result.stderr_path}")
+        print(f"Job {result.job_id}: {result.status.value}")
+        if cap_msg:
+            print(f"Note: {cap_msg}")
+        if result.exit_code is not None:
+            print(f"Exit code: {result.exit_code}")
+        print(f"stdout: {result.stdout_path}")
+        print(f"stderr: {result.stderr_path}")
+        return result
+
+    asyncio.run(_do_status())
 
 
 @instance_app.command()
@@ -340,7 +348,6 @@ def jobs_list(
         print(f"Error: instance '{instance_id}' not found.", file=sys.stderr)
         raise typer.Exit(code=1)
 
-    mgr = JobManager(inst, cfg)
     jobs = mgr.list_jobs()
     if not jobs:
         print("No running jobs.")
@@ -361,17 +368,21 @@ def cancel(
         print(f"Error: instance '{instance_id}' not found.", file=sys.stderr)
         raise typer.Exit(code=1)
 
-    mgr = JobManager(inst, cfg)
-    ok = mgr.cancel(job_id)
-    if ok:
-        inst.audit("job.cancelled", job_id=job_id)
-        result = mgr.poll(job_id, tail=0)
-        print(f"Job {job_id}: cancelled")
-        if result:
-            print(f"stdout: {result.stdout_path}")
-            print(f"stderr: {result.stderr_path}")
-    else:
-        print(f"Job '{job_id}' not found.")
+    async def _do_cancel():
+        mgr = JobManager(inst, cfg)
+        ok = await mgr.cancel(job_id)
+        if ok:
+            inst.audit("job.cancelled", job_id=job_id)
+            result = await mgr.poll(job_id, tail=0)
+            print(f"Job {job_id}: cancelled")
+            if result:
+                print(f"stdout: {result.stdout_path}")
+                print(f"stderr: {result.stderr_path}")
+        else:
+            print(f"Job '{job_id}' not found.")
+        return ok
+
+    asyncio.run(_do_cancel())
 
 @instance_app.command()
 def archive(

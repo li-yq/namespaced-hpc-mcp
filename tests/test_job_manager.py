@@ -6,6 +6,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import pytest
+
 from ns_hpc.job_manager import JobManager, JobStatus, _tail_file
 from ns_hpc.config import Config, load_config
 from ns_hpc.instance import Instance
@@ -20,6 +22,9 @@ instances_dir = "{instances_dir}"
 bind_ro = ["/usr", "/bin", "/lib", "/lib64"]
 workspace_mount = "/workspace"
 flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+
+[resources]
+use_systemd = false
 
 [proxied_mcps]
 
@@ -40,7 +45,8 @@ def _instance(config: Config) -> Instance:
     return Instance.create("test-job", config)
 
 
-def test_tail_file():
+@pytest.mark.asyncio
+async def test_tail_file():
     """Verify _tail_file reads the last N lines."""
     tmp = Path(tempfile.mkstemp()[1])
     try:
@@ -52,11 +58,13 @@ def test_tail_file():
         tmp.unlink()
 
 
-def test_tail_file_nonexistent():
+@pytest.mark.asyncio
+async def test_tail_file_nonexistent():
     assert _tail_file(Path("/nonexistent"), 10) == ""
 
 
-def test_tail_file_empty():
+@pytest.mark.asyncio
+async def test_tail_file_empty():
     tmp = Path(tempfile.mkstemp()[1])
     try:
         tmp.write_text("")
@@ -65,7 +73,8 @@ def test_tail_file_empty():
         tmp.unlink()
 
 
-def test_tail_file_max_bytes():
+@pytest.mark.asyncio
+async def test_tail_file_max_bytes():
     """max_bytes limits how much of the file is read."""
     tmp = Path(tempfile.mkstemp()[1])
     try:
@@ -78,7 +87,8 @@ def test_tail_file_max_bytes():
         tmp.unlink()
 
 
-def test_tail_file_long_single_line():
+@pytest.mark.asyncio
+async def test_tail_file_long_single_line():
     """A single line longer than max_bytes returns truncated content."""
     tmp = Path(tempfile.mkstemp()[1])
     try:
@@ -90,13 +100,14 @@ def test_tail_file_long_single_line():
         tmp.unlink()
 
 
-def test_submit_and_complete(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_submit_and_complete(tmp_path, monkeypatch):
     """Submit a quick command, verify it completes."""
     cfg = _config(str(tmp_path), monkeypatch)
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
 
-    result = mgr.submit("echo hello_job", timeout=10, tail=5)
+    result = await mgr.submit("echo hello_job", timeout=10, tail=5)
     assert result.status == JobStatus.COMPLETED, f"Got {result.status}"
     assert result.exit_code == 0
     assert "hello_job" in result.stdout_tail
@@ -111,24 +122,26 @@ def test_submit_and_complete(tmp_path, monkeypatch):
     assert "hello_job" in Path(host_stdout).read_text()
 
 
-def test_submit_exit_code(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_submit_exit_code(tmp_path, monkeypatch):
     """Verify non-zero exit codes."""
     cfg = _config(str(tmp_path), monkeypatch)
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
 
-    result = mgr.submit("exit 42", timeout=10)
+    result = await mgr.submit("exit 42", timeout=10)
     assert result.status == JobStatus.FAILED
     assert result.exit_code == 42
 
 
-def test_submit_detach_timeout(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_submit_detach_timeout(tmp_path, monkeypatch):
     """Submit a long command, timeout before completion, verify running."""
     cfg = _config(str(tmp_path), monkeypatch)
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
 
-    result = mgr.submit("sleep 30 && echo done", timeout=2, tail=5)
+    result = await mgr.submit("sleep 30 && echo done", timeout=2, tail=5)
     assert result.status == JobStatus.RUNNING, f"Expected RUNNING, got {result.status}"
     # stdout_path is container-side — derive host path for verification
     assert result.stdout_path.startswith(cfg.namespace_defaults.workspace_mount)
@@ -138,38 +151,40 @@ def test_submit_detach_timeout(tmp_path, monkeypatch):
     assert Path(host_stdout).exists()
 
     # Clean up — cancel the still-running job
-    mgr.cancel(result.job_id)
+    await mgr.cancel(result.job_id)
 
 
-def test_poll_running_job(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_poll_running_job(tmp_path, monkeypatch):
     """Submit long command, poll it while running."""
     cfg = _config(str(tmp_path), monkeypatch)
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
 
-    result = mgr.submit("sleep 30", timeout=2, tail=5)
+    result = await mgr.submit("sleep 30", timeout=2, tail=5)
     assert result.status == JobStatus.RUNNING
 
     # Poll with 0 timeout (just check status)
-    polled = mgr.poll(result.job_id, timeout=0)
+    polled = await mgr.poll(result.job_id, timeout=0)
     assert polled is not None
     assert polled.status == JobStatus.RUNNING
 
     # Cancel
-    assert mgr.cancel(result.job_id)
-    assert mgr.poll(result.job_id, timeout=0).status == JobStatus.CANCELLED
+    assert await mgr.cancel(result.job_id)
+    assert (await mgr.poll(result.job_id, timeout=0)).status == JobStatus.CANCELLED
 
 
-def test_list_jobs(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_list_jobs(tmp_path, monkeypatch):
     """Submit two jobs, list them (completed entries are retained)."""
     cfg = _config(str(tmp_path), monkeypatch)
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
 
-    r1 = mgr.submit("echo first", timeout=10)
+    r1 = await mgr.submit("echo first", timeout=10)
     assert r1.status == JobStatus.COMPLETED
 
-    r2 = mgr.submit("sleep 30", timeout=1, tail=5)
+    r2 = await mgr.submit("sleep 30", timeout=1, tail=5)
     assert r2.status == JobStatus.RUNNING
 
     jobs = mgr.list_jobs()
@@ -177,36 +192,39 @@ def test_list_jobs(tmp_path, monkeypatch):
     assert jobs[1]["job_id"] == r2.job_id
     assert jobs[1]["status"] == "running"
 
-    mgr.cancel(r2.job_id)
+    await mgr.cancel(r2.job_id)
 
 
-def test_cancel_running(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_cancel_running(tmp_path, monkeypatch):
     """Submit a long command and cancel it."""
     cfg = _config(str(tmp_path), monkeypatch)
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
 
-    result = mgr.submit("sleep 30", timeout=1, tail=5)
+    result = await mgr.submit("sleep 30", timeout=1, tail=5)
     assert result.status == JobStatus.RUNNING
 
-    assert mgr.cancel(result.job_id)
-    assert mgr.poll(result.job_id, timeout=0).status == JobStatus.CANCELLED
+    assert await mgr.cancel(result.job_id)
+    assert (await mgr.poll(result.job_id, timeout=0)).status == JobStatus.CANCELLED
 
 
-def test_cancel_nonexistent(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_cancel_nonexistent(tmp_path, monkeypatch):
     cfg = _config(str(tmp_path), monkeypatch)
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
-    assert not mgr.cancel("nonexistent")
+    assert not await mgr.cancel("nonexistent")
 
 
-def test_submit_isolation(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_submit_isolation(tmp_path, monkeypatch):
     """Verify job runs inside sandbox, can't access host filesystem."""
     cfg = _config(str(tmp_path), monkeypatch)
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
 
-    result = mgr.submit(
+    result = await mgr.submit(
         "test -f /etc/passwd && echo EXPOSED || echo SAFE",
         timeout=10, tail=5,
     )
@@ -216,13 +234,14 @@ def test_submit_isolation(tmp_path, monkeypatch):
     assert "EXPOSED" in result.stdout_tail or "SAFE" in result.stdout_tail
 
 
-def test_audit_log_written_for_completed_job(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_audit_log_written_for_completed_job(tmp_path, monkeypatch):
     """Verify audit.log is populated after job completion."""
     cfg = _config(str(tmp_path), monkeypatch)
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
 
-    result = mgr.submit("echo hello_audit", timeout=10, tail=5)
+    result = await mgr.submit("echo hello_audit", timeout=10, tail=5)
     assert result.status == JobStatus.COMPLETED
 
     # Call audit as the CLI/MCP layers would

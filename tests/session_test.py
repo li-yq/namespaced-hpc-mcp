@@ -125,7 +125,7 @@ class SessionLog:
 async def s_quick_job(log: SessionLog, mgr: JobManager) -> JobResult:
     """Job finishes before submit timeout → COMPLETED exit 0."""
     log.subheading("Quick job — finishes before timeout")
-    r = mgr.submit("echo ok", timeout=10, tail=5)
+    r = await mgr.submit("echo ok", timeout=10, tail=5)
     log.log_result("submit echo ok", r)
     assert r.status == JobStatus.COMPLETED, f"expected COMPLETED, got {r.status}"
     assert r.exit_code == 0
@@ -137,7 +137,7 @@ async def s_quick_job(log: SessionLog, mgr: JobManager) -> JobResult:
 async def s_repoll_finished_cached(log: SessionLog, mgr: JobManager, quick: JobResult) -> None:
     """Re-poll an already-finished job → instant COMPLETED from cache."""
     log.subheading("Re-poll finished job — cached result")
-    r = mgr.poll(quick.job_id, timeout=0, tail=3)
+    r = await mgr.poll(quick.job_id, timeout=0, tail=3)
     assert r is not None
     log.log_result("poll finished (cached)", r)
     assert r.status == JobStatus.COMPLETED
@@ -146,7 +146,7 @@ async def s_repoll_finished_cached(log: SessionLog, mgr: JobManager, quick: JobR
 async def s_nonzero_exit(log: SessionLog, mgr: JobManager) -> None:
     """exit 42 → FAILED exit_code=42."""
     log.subheading("Non-zero exit code")
-    r = mgr.submit("exit 42", timeout=10)
+    r = await mgr.submit("exit 42", timeout=10)
     log.log_result("submit exit 42", r)
     assert r.status == JobStatus.FAILED
     assert r.exit_code == 42
@@ -155,11 +155,11 @@ async def s_nonzero_exit(log: SessionLog, mgr: JobManager) -> None:
 async def s_timeout_kill(log: SessionLog, mgr: JobManager) -> None:
     """Long job with short timeout + no-detach → TIMEOUT with partial output."""
     log.subheading("Timeout + kill — short timeout, job killed, partial tail")
-    r = mgr.submit(_SEQ_CMD, timeout=3, tail=3)
+    r = await mgr.submit(_SEQ_CMD, timeout=3, tail=3)
     # Simulate the MCP layer's no-detach handling
     if r.status == JobStatus.RUNNING:
-        mgr.cancel(r.job_id)
-        r = mgr.poll(r.job_id, tail=3)
+        await mgr.cancel(r.job_id)
+        r = await mgr.poll(r.job_id, tail=3)
     log.log_result("submit seq timeout=3 (killed)", r)
     assert r.status == JobStatus.CANCELLED, f"expected CANCELLED, got {r.status}"
     assert r.exit_code is None
@@ -168,7 +168,7 @@ async def s_timeout_kill(log: SessionLog, mgr: JobManager) -> None:
 async def s_timeout_detach(log: SessionLog, mgr: JobManager) -> JobResult:
     """Long job with short timeout + detach → RUNNING with partial output."""
     log.subheading("Timeout + detach — submit seq, detach while running")
-    r = mgr.submit(_SEQ_CMD, timeout=3, tail=3)
+    r = await mgr.submit(_SEQ_CMD, timeout=3, tail=3)
     log.log_result("submit seq timeout=3 (detached)", r)
     assert r.status == JobStatus.RUNNING, f"expected RUNNING, got {r.status}"
     assert len(r.stdout_tail) > 0, "expected partial stdout tail"
@@ -178,7 +178,7 @@ async def s_timeout_detach(log: SessionLog, mgr: JobManager) -> JobResult:
 async def s_poll_running(log: SessionLog, mgr: JobManager, running: JobResult) -> None:
     """Poll a still-running job (timeout=0) → RUNNING."""
     log.subheading("Poll running job — peek, no wait")
-    r = mgr.poll(running.job_id, timeout=0, tail=3)
+    r = await mgr.poll(running.job_id, timeout=0, tail=3)
     assert r is not None
     log.log_result("poll running (timeout=0)", r)
     assert r.status == JobStatus.RUNNING, f"expected RUNNING, got {r.status}"
@@ -187,14 +187,14 @@ async def s_poll_running(log: SessionLog, mgr: JobManager, running: JobResult) -
 async def s_poll_then_kill(log: SessionLog, mgr: JobManager, running: JobResult) -> None:
     """Poll a running job, then kill it after timeout."""
     log.subheading("Poll running then kill — wait 2s, cancel")
-    r = mgr.poll(running.job_id, timeout=2, tail=3)
+    r = await mgr.poll(running.job_id, timeout=2, tail=3)
     assert r is not None
     log.log_result("poll running (timeout=2)", r)
     # If it finished in the 2s window, great; else cancel
     if r.status == JobStatus.RUNNING:
-        ok = mgr.cancel(running.job_id)
+        ok = await mgr.cancel(running.job_id)
         log.ok("cancelled after poll", f"ok={ok}")
-        r2 = mgr.poll(running.job_id, timeout=0, tail=3)
+        r2 = await mgr.poll(running.job_id, timeout=0, tail=3)
         assert r2 is not None
         log.log_result("poll after cancel", r2)
         assert r2.status == JobStatus.CANCELLED
@@ -203,14 +203,14 @@ async def s_poll_then_kill(log: SessionLog, mgr: JobManager, running: JobResult)
 async def s_poll_finished_after_submit(log: SessionLog, mgr: JobManager) -> JobResult:
     """Submit seq, let it finish naturally, poll → COMPLETED full tail."""
     log.subheading("Submit detach, wait for natural completion, poll")
-    r = mgr.submit(_SEQ_CMD, timeout=5, tail=3)
+    r = await mgr.submit(_SEQ_CMD, timeout=5, tail=3)
     log.log_result("submit seq timeout=5 (detach)", r)
     if r.status == JobStatus.COMPLETED:
         log.ok("(already finished in submit window)")
         return r
     # The seq loop needs ~20s total; we've waited 5s already.
     # Poll with a generous timeout to let it finish.
-    r2 = mgr.poll(r.job_id, timeout=30, tail=5)
+    r2 = await mgr.poll(r.job_id, timeout=30, tail=5)
     assert r2 is not None
     log.log_result("poll after completion", r2)
     assert r2.status == JobStatus.COMPLETED, f"expected COMPLETED, got {r2.status}"
@@ -222,13 +222,13 @@ async def s_poll_finished_after_submit(log: SessionLog, mgr: JobManager) -> JobR
 async def s_cancel_running(log: SessionLog, mgr: JobManager) -> None:
     """Cancel a running job → CANCELLED with output."""
     log.subheading("Cancel running job")
-    r = mgr.submit(_SEQ_CMD, timeout=3, tail=3)
+    r = await mgr.submit(_SEQ_CMD, timeout=3, tail=3)
     assert r.status == JobStatus.RUNNING, f"expected RUNNING, got {r.status}"
     log.log_result("submit seq (detach)", r)
-    ok = mgr.cancel(r.job_id)
+    ok = await mgr.cancel(r.job_id)
     log.ok("cancel", f"ok={ok}")
     assert ok
-    r2 = mgr.poll(r.job_id, timeout=0, tail=3)
+    r2 = await mgr.poll(r.job_id, timeout=0, tail=3)
     assert r2 is not None
     log.log_result("poll after cancel", r2)
     assert r2.status == JobStatus.CANCELLED, f"expected CANCELLED, got {r2.status}"
@@ -237,10 +237,10 @@ async def s_cancel_running(log: SessionLog, mgr: JobManager) -> None:
 async def s_cancel_finished(log: SessionLog, mgr: JobManager, finished: JobResult) -> None:
     """Cancel an already-finished job → no-op, still COMPLETED."""
     log.subheading("Cancel already-finished job — no-op")
-    ok = mgr.cancel(finished.job_id)
+    ok = await mgr.cancel(finished.job_id)
     log.ok("cancel finished", f"ok={ok}")
     assert ok
-    r = mgr.poll(finished.job_id, timeout=0, tail=3)
+    r = await mgr.poll(finished.job_id, timeout=0, tail=3)
     assert r is not None
     log.log_result("poll after cancel finished", r)
     assert r.status == JobStatus.COMPLETED
@@ -262,7 +262,7 @@ async def s_list_jobs(log: SessionLog, mgr: JobManager) -> None:
 
 async def s_slurm_quick(log: SessionLog, mgr: JobManager) -> JobResult:
     log.subheading("Slurm quick job")
-    r = mgr.submit("echo hello_slurm", mode="slurm", timeout=30, tail=5)
+    r = await mgr.submit("echo hello_slurm", mode="slurm", timeout=30, tail=5)
     log.log_result("submit slurm echo", r)
     assert r.status == JobStatus.COMPLETED
     assert r.exit_code == 0
@@ -272,7 +272,7 @@ async def s_slurm_quick(log: SessionLog, mgr: JobManager) -> JobResult:
 
 async def s_slurm_nonzero(log: SessionLog, mgr: JobManager) -> None:
     log.subheading("Slurm non-zero exit")
-    r = mgr.submit("exit 42", mode="slurm", timeout=30)
+    r = await mgr.submit("exit 42", mode="slurm", timeout=30)
     log.log_result("submit slurm exit 42", r)
     assert r.status == JobStatus.FAILED
     assert r.exit_code == 42
@@ -280,7 +280,7 @@ async def s_slurm_nonzero(log: SessionLog, mgr: JobManager) -> None:
 
 async def s_slurm_detach(log: SessionLog, mgr: JobManager) -> JobResult:
     log.subheading("Slurm timeout + detach")
-    r = mgr.submit(_SEQ_CMD, mode="slurm", timeout=5, tail=3)
+    r = await mgr.submit(_SEQ_CMD, mode="slurm", timeout=5, tail=3)
     log.log_result("submit slurm seq (detach)", r)
     assert r.status == JobStatus.RUNNING, f"expected RUNNING, got {r.status}"
     return r
@@ -288,7 +288,7 @@ async def s_slurm_detach(log: SessionLog, mgr: JobManager) -> JobResult:
 
 async def s_slurm_poll(log: SessionLog, mgr: JobManager, running: JobResult) -> None:
     log.subheading("Slurm poll running")
-    r = mgr.poll(running.job_id, timeout=0, tail=3)
+    r = await mgr.poll(running.job_id, timeout=0, tail=3)
     assert r is not None
     log.log_result("poll slurm", r)
     assert r.status in (JobStatus.PENDING, JobStatus.RUNNING, JobStatus.COMPLETED)
@@ -296,7 +296,7 @@ async def s_slurm_poll(log: SessionLog, mgr: JobManager, running: JobResult) -> 
 
 async def s_slurm_repoll_cached(log: SessionLog, mgr: JobManager, quick: JobResult) -> None:
     log.subheading("Slurm re-poll finished (cached)")
-    r = mgr.poll(quick.job_id, timeout=0, tail=3)
+    r = await mgr.poll(quick.job_id, timeout=0, tail=3)
     assert r is not None
     log.log_result("poll slurm cached", r)
     assert r.status == JobStatus.COMPLETED
@@ -304,10 +304,10 @@ async def s_slurm_repoll_cached(log: SessionLog, mgr: JobManager, quick: JobResu
 
 async def s_slurm_cancel(log: SessionLog, mgr: JobManager, running: JobResult) -> None:
     log.subheading("Slurm cancel running")
-    ok = mgr.cancel(running.job_id)
+    ok = await mgr.cancel(running.job_id)
     log.ok("cancel slurm", f"ok={ok}")
     assert ok
-    r = mgr.poll(running.job_id, timeout=0, tail=3)
+    r = await mgr.poll(running.job_id, timeout=0, tail=3)
     assert r is not None
     log.log_result("poll after slurm cancel", r)
     # Job may have finished between the submit poll and cancel; that's fine
@@ -335,14 +335,14 @@ async def s_recovery_completed(log: SessionLog, inst: Instance, cfg: Config) -> 
     """Submit quick job via mgr1, create mgr2, verify COMPLETED loaded from disk."""
     log.subheading("Recovery — completed job survives server restart")
     mgr1 = JobManager(inst, cfg)
-    r = mgr1.submit("echo recovery_check", timeout=10)
+    r = await mgr1.submit("echo recovery_check", timeout=10)
     log.log_result("mgr1 submit echo", r)
     assert r.status == JobStatus.COMPLETED
     job_id = r.job_id
 
     # Simulate server restart — new JobManager reads from disk
     mgr2 = JobManager(inst, cfg)
-    r2 = mgr2.poll(job_id, timeout=0, tail=5)
+    r2 = await mgr2.poll(job_id, timeout=0, tail=5)
     assert r2 is not None
     log.log_result("mgr2 poll (after restart)", r2)
     assert r2.status == JobStatus.COMPLETED, f"expected COMPLETED, got {r2.status}"
@@ -354,19 +354,19 @@ async def s_recovery_running_then_completed(log: SessionLog, inst: Instance, cfg
     """Submit seq loop via mgr1, let it finish, create mgr2, verify status file detects completion."""
     log.subheading("Recovery — job finishes while server is down, status file recovery")
     mgr1 = JobManager(inst, cfg)
-    r = mgr1.submit(_SEQ_CMD, timeout=3, tail=3)
+    r = await mgr1.submit(_SEQ_CMD, timeout=3, tail=3)
     log.log_result("mgr1 submit seq (detach)", r)
     assert r.status == JobStatus.RUNNING
     job_id = r.job_id
 
     # Wait for the seq loop to finish naturally (~20s total, waited 3s already)
-    r_final = mgr1.poll(job_id, timeout=30, tail=5)
+    r_final = await mgr1.poll(job_id, timeout=30, tail=5)
     assert r_final is not None and r_final.status == JobStatus.COMPLETED
     log.log_result("job finished before restart", r_final)
 
     # Simulate server restart — new mgr should detect COMPLETED via status file
     mgr2 = JobManager(inst, cfg)
-    r2 = mgr2.poll(job_id, timeout=0, tail=5)
+    r2 = await mgr2.poll(job_id, timeout=0, tail=5)
     assert r2 is not None
     log.log_result("mgr2 poll (after restart)", r2)
     assert r2.status == JobStatus.COMPLETED, f"expected COMPLETED, got {r2.status}"
@@ -378,18 +378,18 @@ async def s_recovery_running_still_alive(log: SessionLog, inst: Instance, cfg: C
     """Job still running when server restarts — /proc liveness check keeps it RUNNING."""
     log.subheading("Recovery — job still running after restart")
     mgr1 = JobManager(inst, cfg)
-    r = mgr1.submit(_SEQ_CMD, timeout=2, tail=3)
+    r = await mgr1.submit(_SEQ_CMD, timeout=2, tail=3)
     log.log_result("mgr1 submit seq (detach)", r)
     assert r.status == JobStatus.RUNNING
 
     # With exec in shell_cmd, proc.pid is the outer bwrap (comm="bwrap"),
     # so _is_bwrap_alive finds it alive and keeps the job RUNNING.
     mgr2 = JobManager(inst, cfg)
-    r2 = mgr2.poll(r.job_id, timeout=0, tail=3)
+    r2 = await mgr2.poll(r.job_id, timeout=0, tail=3)
     assert r2 is not None
     log.log_result("mgr2 poll (still running after restart)", r2)
     assert r2.status == JobStatus.RUNNING, f"expected RUNNING, got {r2.status}"
-    r3 = mgr2.poll(r.job_id, timeout=30, tail=5)
+    r3 = await mgr2.poll(r.job_id, timeout=30, tail=5)
     assert r3 is not None
     log.log_result("mgr2 poll (after completion)", r3)
     assert r3.status == JobStatus.COMPLETED
@@ -397,21 +397,21 @@ async def s_recovery_running_still_alive(log: SessionLog, inst: Instance, cfg: C
 
     # Cleanup — cancel the original mgr1 job so it doesn't linger
     if r.status == JobStatus.RUNNING:
-        mgr1.cancel(r.job_id)
+        await mgr1.cancel(r.job_id)
 
 
 async def s_recovery_cancelled(log: SessionLog, inst: Instance, cfg: Config) -> None:
     """Submit + cancel via mgr1, create mgr2, verify CANCELLED loaded from disk."""
     log.subheading("Recovery — cancelled job survives server restart")
     mgr1 = JobManager(inst, cfg)
-    r = mgr1.submit("sleep 30", timeout=2, tail=3)
+    r = await mgr1.submit("sleep 30", timeout=2, tail=3)
     assert r.status == JobStatus.RUNNING
-    mgr1.cancel(r.job_id)
+    await mgr1.cancel(r.job_id)
     log.ok("mgr1 submit + cancel", f"job={r.job_id}")
 
     # Simulate server restart
     mgr2 = JobManager(inst, cfg)
-    r2 = mgr2.poll(r.job_id, timeout=0, tail=3)
+    r2 = await mgr2.poll(r.job_id, timeout=0, tail=3)
     assert r2 is not None
     log.log_result("mgr2 poll cancelled (after restart)", r2)
     assert r2.status == JobStatus.CANCELLED, f"expected CANCELLED, got {r2.status}"
@@ -421,8 +421,8 @@ async def s_recovery_list_across_restart(log: SessionLog, inst: Instance, cfg: C
     """Submit two jobs via mgr1, restart, mgr2.list_jobs() sees both."""
     log.subheading("Recovery — list_jobs after restart")
     mgr1 = JobManager(inst, cfg)
-    r1 = mgr1.submit("echo job_a", timeout=10)
-    r2 = mgr1.submit("echo job_b", timeout=10)
+    r1 = await mgr1.submit("echo job_a", timeout=10)
+    r2 = await mgr1.submit("echo job_b", timeout=10)
     log.ok("mgr1 submitted two jobs", f"{r1.job_id}, {r2.job_id}")
 
     mgr2 = JobManager(inst, cfg)
@@ -437,12 +437,12 @@ async def s_slurm_recovery_completed(log: SessionLog, inst: Instance, cfg: Confi
     """Submit slurm job via mgr1, restart, mgr2 loads COMPLETED from disk."""
     log.subheading("Slurm recovery — completed job survives restart")
     mgr1 = JobManager(inst, cfg)
-    r = mgr1.submit("echo slurm_recovery", mode="slurm", timeout=30)
+    r = await mgr1.submit("echo slurm_recovery", mode="slurm", timeout=30)
     log.log_result("mgr1 submit slurm", r)
     assert r.status == JobStatus.COMPLETED
 
     mgr2 = JobManager(inst, cfg)
-    r2 = mgr2.poll(r.job_id, timeout=0, tail=5)
+    r2 = await mgr2.poll(r.job_id, timeout=0, tail=5)
     assert r2 is not None
     log.log_result("mgr2 poll slurm (after restart)", r2)
     assert r2.status == JobStatus.COMPLETED
@@ -452,7 +452,7 @@ async def s_slurm_recovery_running(log: SessionLog, inst: Instance, cfg: Config)
     """Submit slurm detach via mgr1, restart, mgr2 sees RUNNING and waits for completion."""
     log.subheading("Slurm recovery — running job survives restart, poll waits for completion")
     mgr1 = JobManager(inst, cfg)
-    r = mgr1.submit(_SEQ_CMD, mode="slurm", timeout=5, tail=3)
+    r = await mgr1.submit(_SEQ_CMD, mode="slurm", timeout=5, tail=3)
     log.log_result("mgr1 submit slurm seq (detach)", r)
     assert r.status == JobStatus.RUNNING
 
@@ -460,7 +460,7 @@ async def s_slurm_recovery_running(log: SessionLog, inst: Instance, cfg: Config)
     mgr2 = JobManager(inst, cfg)
     # _fixup_stale_jobs runs in __init__, but it only reconciles "local" mode
     # For slurm, the job entry stays "running" and mgr2 can poll sacct
-    r2 = mgr2.poll(r.job_id, timeout=30, tail=5)
+    r2 = await mgr2.poll(r.job_id, timeout=30, tail=5)
     assert r2 is not None
     log.log_result("mgr2 poll slurm (after restart)", r2)
     assert r2.status == JobStatus.COMPLETED, f"expected COMPLETED, got {r2.status}"

@@ -387,10 +387,10 @@ class JobManager:
                 "-p", f"MemoryMax={memory}",
                 "--", "sh", "-c",
             ]
-            logger.debug("running: %s", shlex.join(runner + [shell_cmd]))
+            logger.debug("running: %s", repr(shlex.join(runner + [shell_cmd])))
             proc = await asyncio.create_subprocess_exec(*runner, shell_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         else:
-            logger.debug("running: sh -c %s", shell_cmd[:200])
+            logger.debug("running: sh -c %s", repr(shell_cmd[:200]))
             proc = await asyncio.create_subprocess_exec("sh", "-c", shell_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
 
         self._jobs[job_id] = {

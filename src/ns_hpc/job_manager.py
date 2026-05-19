@@ -501,7 +501,12 @@ class JobManager:
             raise RuntimeError(f"sbatch failed: {stderr_text}")
 
         stdout_text = stdout_bytes.decode(errors="replace").strip()
-        await asyncio.sleep(2)
+
+        # Slurm accounting database (slurmdbd) lags behind the controller:
+        # sbatch returns immediately, but sacct may not reflect the job for
+        # several seconds.  Sleep before returning so the caller's poll()
+        # doesn't hit a "not found" race on the first sacct query.
+        await asyncio.sleep(5)
 
         self._jobs[job_id] = {
             "command": command,
@@ -678,7 +683,13 @@ class JobManager:
                 logger.debug("sacct %s state=%s exit_code=%s", slurm_job_id, state, ec)
                 return (state, ec)
 
-        raise RuntimeError(f"slurm job {slurm_job_id} not found in sacct output")
+        # Job not yet visible in sacct (slurmdbd propagation delay) — the
+        # caller should keep polling rather than treating this as an error.
+        logger.debug(
+            "sacct %s: job not found yet (slurmdbd propagation delay)",
+            slurm_job_id,
+        )
+        return (None, None)
 
     async def _poll_slurm(
         self,
@@ -695,9 +706,23 @@ class JobManager:
             raise ValueError("job has no slurm_job_id — missing slurm identifier")
 
         deadline = time.monotonic() + timeout if timeout > 0 else None
+        not_found_count = 0
 
         while True:
             state, ec = await self._slurm_job_state(slurm_job_id)
+
+            if state is None:
+                not_found_count += 1
+            else:
+                not_found_count = 0
+
+            # Give up after ~30s of consecutive "not found" responses
+            # to avoid looping forever on a genuinely missing job ID.
+            if not_found_count >= 6:
+                raise RuntimeError(
+                    f"slurm job {slurm_job_id} not found in sacct output "
+                    f"after {not_found_count} consecutive retries"
+                )
 
             if state in ("COMPLETED",):
                 # Prefer exit code from status file (more precise than sacct)

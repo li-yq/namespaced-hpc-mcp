@@ -108,7 +108,7 @@ def bwrap(
         workspace_host_path=str(inst.workspace_dir),
         config=cfg,
         extra_rw_binds=[(str(inst.output_path), "/output")],
-        extra_ro_binds=[(str(shared_output_root), "/shared-output")],
+        extra_ro_binds=[(str(shared_output_root), cfg.namespace.shared_output_mount)],
         extra_bwrap_flags=["--json-status-fd", str(fd)],
     )
     os.execvp(bwrap_path, argv)
@@ -436,6 +436,6 @@ def enter(
         workspace_host_path=str(inst.workspace_dir),
         config=cfg,
         extra_rw_binds=[(str(inst.output_path), "/output")],
-        extra_ro_binds=[(str(shared_output_root), "/shared-output")],
+        extra_ro_binds=[(str(shared_output_root), cfg.namespace.shared_output_mount)],
     )
     os.execvp("bwrap", argv)

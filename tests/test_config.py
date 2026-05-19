@@ -10,6 +10,7 @@ def test_default_config_values():
     from ns_hpc.config import _default_config
     cfg = _default_config()
     assert cfg.namespace.workspace_mount == "/workspace"
+    assert cfg.namespace.shared_output_mount == "/shared-output"
     assert "--share-net" in cfg.namespace.bwrap_command
     assert "filesystem" in cfg.proxied_mcps
     assert cfg.proxied_mcps["filesystem"].command == "npx"
@@ -39,6 +40,7 @@ instances_dir = "~/.local/share/ns-hpc/instances"
 bwrap_command = ["bwrap", "--unshare-all", "--share-net", "--proc", "/proc"]
 workspace_mount = "/project"
 output_mount = "/out"
+shared_output_mount = "/shared-out"
 
 [jobs]
 max_timeout = 7200
@@ -73,6 +75,7 @@ resource_patterns = ["*.rst", "*.txt"]
         cfg = load_config(tmp)
         assert cfg.namespace.workspace_mount == "/project"
         assert cfg.namespace.output_mount == "/out"
+        assert cfg.namespace.shared_output_mount == "/shared-out"
         assert cfg.namespace.bwrap_command == ["bwrap", "--unshare-all", "--share-net", "--proc", "/proc"]
         assert cfg.jobs.max_timeout == 7200
         assert cfg.jobs.local.use_cgroups is True

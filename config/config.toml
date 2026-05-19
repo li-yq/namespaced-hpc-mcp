@@ -22,9 +22,11 @@ bwrap_command = [
     "--ro-bind", "/sbin", "/sbin",
     "--ro-bind", "/etc", "/etc",
 ]
-# Mount point for the per-instance writable workspace.
+# Mount point for the per-instance writable workspace (read-write).
 # workspace_mount = "/workspace"
-# Mount point for the shared output directory (inter-instance file exchange).
+# Mount point for the shared (read-only) output exchange across instances.
+# shared_output_mount = "/shared-output"
+# Mount point for the per-instance output files (read-write).
 # output_mount = "/output"
 # File descriptor used for bwrap --json-status-fd (job completion tracking).
 # status_fd = 3

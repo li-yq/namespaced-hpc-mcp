@@ -21,6 +21,7 @@ class Namespace(BaseModel):
     bwrap_command: list[str]
     workspace_mount: str = "/workspace"
     output_mount: str = "/output"
+    shared_output_mount: str = "/shared-output"
     status_fd: int = 3
 
 

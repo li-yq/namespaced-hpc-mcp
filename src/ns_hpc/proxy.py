@@ -89,7 +89,7 @@ class ProxiedMCPClient:
             workspace_host_path=str(inst.workspace_dir),
             config=self.config,
             extra_rw_binds=[(str(inst.output_path), ns.output_mount)],
-            extra_ro_binds=[(str(shared_output_root), "/shared-output")],
+            extra_ro_binds=[(str(shared_output_root), ns.shared_output_mount)],
         )
 
         transport = StdioTransport(

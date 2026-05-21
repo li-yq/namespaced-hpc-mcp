@@ -407,7 +407,7 @@ class JobManager:
         shell_cmd = (
             f"exec {sys.executable} -m ns_hpc bwrap {self.instance.id}"
             f" -- "
-            f"/bin/sh -c {shlex.quote(command)}"
+            f"/bin/bash -c {shlex.quote(command)}"
             f" >{shlex.quote(str(stdout_path))} 2>{shlex.quote(str(stderr_path))}"
             f" {status_fd}>{shlex.quote(str(status_path))}"
         )
@@ -456,7 +456,7 @@ class JobManager:
         status_fd = self.config.namespace.status_fd
         bwrap_cmd = (
             f"exec {sys.executable} -m ns_hpc bwrap {self.instance.id} -- "
-            f"/bin/sh -c {shlex.quote(command)}"
+            f"/bin/bash -c {shlex.quote(command)}"
             f" {status_fd}>{shlex.quote(str(status_path))}"
         )
 

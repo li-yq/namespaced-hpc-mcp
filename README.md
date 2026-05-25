@@ -29,7 +29,9 @@ ns-hpc bwrap my-instance -- python -c "print('hello from sandbox')"
 ns-hpc instance enter my-instance
 
 # Start the MCP server
-ns-hpc run
+ns-hpc run                                    # stdio (default)
+ns-hpc run --transport streamable-http        # HTTP on :8000/mcp
+ns-hpc run -t streamable-http --uds /tmp/ns-hpc.sock  # Unix socket
 
 # Clean up old instances
 ns-hpc clean --days 7
@@ -115,7 +117,7 @@ See `config/config.toml` for the full default configuration.
 | `ns-hpc instance describe <id>` | Show instance metadata |
 | `ns-hpc instance update <id> -d <desc>` | Update instance description |
 | `ns-hpc instance archive <id>` | Archive an instance, disabling new job submissions |
-| `ns-hpc run` | Start MCP server (stdio) |
+| `ns-hpc run` | Start MCP server (stdio, streamable-http, sse, or UDS) |
 | `ns-hpc clean --days 7` | Remove stale instances |
 
 ## MCP Tools
@@ -218,6 +220,8 @@ args = ["/"]
 
 ### 5. Start the Server
 
+**Stdio (default) — for SSH-based clients:**
+
 ```bash
 # Over stdio (for MCP clients connecting via SSH)
 ns-hpc run
@@ -234,6 +238,44 @@ Configure your MCP client (e.g. Claude Desktop, VS Code) to launch via SSH:
     }
   }
 }
+```
+
+**Streamable HTTP — recommended for direct HTTP access:**
+
+```bash
+# Start on localhost:8000/mcp
+ns-hpc run --transport streamable-http
+
+# Or bind to all interfaces on a custom port
+ns-hpc run -t streamable-http --host 0.0.0.0 --port 9000
+```
+
+Client connection:
+
+```json
+{
+  "mcpServers": {
+    "ns-hpc": {
+      "url": "http://user@hpc-login:9000/mcp"
+    }
+  }
+}
+```
+
+**Unix Domain Socket — for local-only deployments:**
+
+```bash
+# Bind to a Unix socket (no TCP port needed)
+ns-hpc run -t streamable-http --uds /tmp/ns-hpc.sock
+```
+
+UDS is useful when the MCP client is on the same machine — it avoids
+exposing a TCP port and leverages filesystem permissions for access control.
+
+**SSE (legacy) — for older MCP clients:**
+
+```bash
+ns-hpc run --transport sse --host 0.0.0.0 --port 8080
 ```
 
 ## Security

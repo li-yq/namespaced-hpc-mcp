@@ -45,11 +45,62 @@ def main(
 
 
 @app.command()
-def run():
-    """Start the MCP server (stdio)."""
+def run(
+    transport: str = typer.Option(
+        "stdio", "--transport", "-t",
+        help="Transport: stdio, streamable-http, or sse",
+    ),
+    host: str = typer.Option(
+        "127.0.0.1", "--host", "-H",
+        help="HTTP host (ignored for stdio and UDS)",
+    ),
+    port: int = typer.Option(
+        8000, "--port", "-p",
+        help="HTTP port (ignored for stdio and UDS)",
+    ),
+    uds: str | None = typer.Option(
+        None, "--uds", "-u",
+        help="Unix Domain Socket path; overrides host/port",
+    ),
+    path: str = typer.Option(
+        "/mcp", "--path",
+        help="HTTP endpoint path",
+    ),
+):
+    """Start the MCP server.
+
+    Supports three transports:
+
+    * **stdio** — Standard I/O (default).  Use with SSH or pipe-based MCP
+      clients.
+
+    * **streamable-http** — Streamable HTTP transport.  The recommended
+      transport for HTTP-based clients.  Supports SSE polling/resumability
+      and both stateful and stateless operation.
+
+    * **sse** — Server-Sent Events transport.  Legacy compatibility;
+      prefer streamable-http for new deployments.
+
+    **Unix Domain Sockets**: When --uds is specified, the server binds to
+    a Unix socket instead of TCP.  Host and port are ignored.
+
+    Examples:
+
+        ns-hpc run                                         # stdio
+        ns-hpc run --transport streamable-http              # HTTP :8000/mcp
+        ns-hpc run -t streamable-http -p 9000               # HTTP :9000/mcp
+        ns-hpc run -t streamable-http --uds /tmp/mcp.sock   # UDS
+        ns-hpc run -t sse --host 0.0.0.0 --port 8080        # SSE
+    """
     from ns_hpc.server import run_server
 
-    run_server()
+    run_server(
+        transport=transport,
+        host=host,
+        port=port,
+        uds=uds,
+        path=path,
+    )
 
 
 @app.command()

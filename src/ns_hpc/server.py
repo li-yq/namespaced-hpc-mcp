@@ -519,13 +519,45 @@ async def cancel_job(input: CancelJobInput, ctx: Context) -> dict:
 # ── Entry point ────────────────────────────────────────────────────────────
 
 
-def run_server(config_path: str | None = None) -> None:
-    """Start the MCP server over stdio.
+
+def run_server(
+    config_path: str | None = None,
+    transport: str = "stdio",
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    uds: str | None = None,
+    path: str = "/mcp",
+) -> None:
+    """Start the MCP server.
 
     This is the entry point called from the CLI.
 
     Args:
         config_path: Optional override for the config.toml path.
+        transport: Transport protocol — "stdio", "streamable-http", or "sse".
+        host: HTTP host (ignored for stdio and UDS).
+        port: HTTP port (ignored for stdio and UDS).
+        uds: Unix Domain Socket path — overrides host/port when set.
+        path: HTTP endpoint path.
     """
     _enable_debug_logging()
-    mcp.run(transport="stdio")
+
+    if config_path is not None:
+        load_config(config_path)  # validate early, ignore result
+
+    if transport not in ("stdio", "streamable-http", "sse"):
+        raise ValueError(
+            f"Unknown transport: {transport!r}. "
+            f"Must be one of: stdio, streamable-http, sse"
+        )
+
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        mcp.run(
+            transport=transport,
+            host=host,
+            port=port,
+            path=path,
+            uvicorn_config={"uds": uds} if uds else None,
+        )

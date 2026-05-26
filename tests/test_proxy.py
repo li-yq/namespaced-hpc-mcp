@@ -394,3 +394,103 @@ def test_proxy_functiontool_passes_annotations():
     assert ft.annotations.readOnlyHint is True
     assert ft.annotations.destructiveHint is False
     assert ft.annotations.idempotentHint is True
+
+
+# ── Tool include/exclude filter tests ──────────────────────────────────────
+
+
+def _make_tool(name: str) -> object:
+    """Create a minimal tool-like object with just a name attribute."""
+    from mcp.types import Tool
+    return Tool(
+        name=name,
+        description=f"Tool {name}",
+        inputSchema={"type": "object", "properties": {}, "required": []},
+    )
+
+
+def test_filter_tools_empty_lists():
+    """Both include and exclude empty → all tools pass through."""
+    from ns_hpc.server import _filter_tools
+    from ns_hpc.config import ProxiedMCP
+
+    cfg = ProxiedMCP(command="test", include=[], exclude=[])
+    tools = [_make_tool("read"), _make_tool("write"), _make_tool("delete")]
+    result = _filter_tools("test", cfg, tools)
+    assert [t.name for t in result] == ["read", "write", "delete"]
+
+
+def test_filter_tools_include_only():
+    """include is non-empty → only matching tools kept."""
+    from ns_hpc.server import _filter_tools
+    from ns_hpc.config import ProxiedMCP
+
+    cfg = ProxiedMCP(command="test", include=["read", "list_*"])
+    tools = [_make_tool("read"), _make_tool("write"), _make_tool("list_files"), _make_tool("list_dirs")]
+    result = _filter_tools("test", cfg, tools)
+    names = {t.name for t in result}
+    assert names == {"read", "list_files", "list_dirs"}
+    assert "write" not in names
+
+
+def test_filter_tools_exclude_only():
+    """exclude is non-empty → matching tools removed."""
+    from ns_hpc.server import _filter_tools
+    from ns_hpc.config import ProxiedMCP
+
+    cfg = ProxiedMCP(command="test", exclude=["delete_*", "write"])
+    tools = [_make_tool("read"), _make_tool("write"), _make_tool("delete_file"), _make_tool("delete_dir")]
+    result = _filter_tools("test", cfg, tools)
+    names = {t.name for t in result}
+    assert names == {"read"}
+
+
+def test_filter_tools_include_and_exclude():
+    """Both set → must match include AND not match exclude."""
+    from ns_hpc.server import _filter_tools
+    from ns_hpc.config import ProxiedMCP
+
+    cfg = ProxiedMCP(command="test", include=["file_*"], exclude=["*_dangerous"])
+    tools = [
+        _make_tool("file_read"),
+        _make_tool("file_write"),
+        _make_tool("file_dangerous"),
+        _make_tool("dir_list"),
+    ]
+    result = _filter_tools("test", cfg, tools)
+    names = {t.name for t in result}
+    assert names == {"file_read", "file_write"}
+
+
+def test_filter_tools_exclude_no_match():
+    """exclude patterns that match nothing keep all tools."""
+    from ns_hpc.server import _filter_tools
+    from ns_hpc.config import ProxiedMCP
+
+    cfg = ProxiedMCP(command="test", exclude=["nonexistent"])
+    tools = [_make_tool("read"), _make_tool("write")]
+    result = _filter_tools("test", cfg, tools)
+    assert [t.name for t in result] == ["read", "write"]
+
+
+def test_filter_tools_include_glob():
+    """Glob patterns in include list work correctly."""
+    from ns_hpc.server import _filter_tools
+    from ns_hpc.config import ProxiedMCP
+
+    cfg = ProxiedMCP(command="test", include=["file_*"])
+    tools = [_make_tool("file_read"), _make_tool("file_write"), _make_tool("dir_list")]
+    result = _filter_tools("test", cfg, tools)
+    names = {t.name for t in result}
+    assert names == {"file_read", "file_write"}
+
+
+def test_filter_tools_include_returns_empty():
+    """If include matches nothing, result is empty."""
+    from ns_hpc.server import _filter_tools
+    from ns_hpc.config import ProxiedMCP
+
+    cfg = ProxiedMCP(command="test", include=["nonexistent"])
+    tools = [_make_tool("read"), _make_tool("write")]
+    result = _filter_tools("test", cfg, tools)
+    assert result == []

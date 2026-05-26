@@ -14,6 +14,8 @@ class ProxiedMCP(BaseModel):
     command: str
     args: list[str] | None = None
     env: dict[str, str] | None = None
+    include: list[str] = []
+    exclude: list[str] = []
 
 
 class Namespace(BaseModel):

@@ -89,6 +89,16 @@ memory = { default = 4096, max = 32768 }
 # args = ["my-mcp-server"]
 # env = {TOKEN = "sekret"}
 
+# Each proxied MCP can restrict which remote tools are exposed via include/
+# exclude glob patterns.  If both are set, a tool must match an include pattern
+# AND not match any exclude pattern.  Both default to [] — all tools exposed.
+#
+# [proxied_mcps.filesystem]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/"]
+# include = ["read_*", "list_*"]    # only consider these tools
+# exclude = ["*_dangerous"]         # drop matching tools from include result
+
 [proxied_mcps.filesystem]
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/"]

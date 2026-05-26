@@ -139,6 +139,52 @@ def _make_proxy_handler(
     return handler
 
 
+def _filter_tools(
+    proxy_name: str,
+    cfg: ProxiedMCP,
+    tools: list,
+    logger: Any = None,
+) -> list:
+    """Apply include/exclude glob patterns to a list of discovered MCP tools.
+
+    - If *include* is non-empty, only tools matching at least one include
+      pattern are kept.
+    - If *exclude* is non-empty, tools matching any exclude pattern are
+      removed.
+    - If both are set, a tool must match an include pattern AND not match
+      any exclude pattern.
+    - If both are empty, all tools pass through.
+    """
+    if cfg.include or cfg.exclude:
+        before = {t.name for t in tools}
+
+    kept = tools
+    if cfg.include:
+        kept = [t for t in kept if any(
+            fnmatch.fnmatch(t.name, pat) for pat in cfg.include
+        )]
+    if cfg.exclude:
+        kept = [t for t in kept if not any(
+            fnmatch.fnmatch(t.name, pat) for pat in cfg.exclude
+        )]
+
+    if cfg.include or cfg.exclude:
+        after = {t.name for t in kept}
+        dropped = before - after
+        if dropped and logger:
+            logger.info(
+                "proxied MCP %r filtered: dropped %s, kept %s "
+                "(include=%s, exclude=%s)",
+                proxy_name,
+                sorted(dropped),
+                sorted(after),
+                cfg.include,
+                cfg.exclude,
+            )
+
+    return kept
+
+
 async def _register_proxied_tools(server: FastMCP, config: Config) -> ProxyManager:
     """Discover tools from each proxied MCP and register wrapped FunctionTools."""
     pm = ProxyManager()
@@ -148,6 +194,14 @@ async def _register_proxied_tools(server: FastMCP, config: Config) -> ProxyManag
         if not remote_tools:
             logger = __import__("logging").getLogger("ns-hpc")
             logger.warning("no tools discovered for proxied MCP %r, skipping", proxy_name)
+            continue
+
+        # Apply allow/deny filtering
+        remote_tools = _filter_tools(
+            proxy_name, proxy_cfg, remote_tools,
+            logger=__import__("logging").getLogger("ns-hpc"),
+        )
+        if not remote_tools:
             continue
 
         for remote_tool in remote_tools:

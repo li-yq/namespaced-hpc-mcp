@@ -171,6 +171,7 @@ async def _register_proxied_tools(server: FastMCP, config: Config) -> ProxyManag
                 name=tool_name,
                 description=remote_tool.description or "",
                 parameters=combined_schema,
+                annotations=remote_tool.annotations,
             )
             server.add_tool(ft)
 

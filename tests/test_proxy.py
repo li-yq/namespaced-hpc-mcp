@@ -349,3 +349,48 @@ async def test_proxy_handler_audit_no_connected_on_reuse(tmp_path, monkeypatch):
     # proxy.call.started and completed appear twice each
     assert event_types.count("proxy.call.started") == 2
     assert event_types.count("proxy.call.completed") == 2
+
+
+# ── Annotation pass-through test ────────────────────────────────────────────
+
+
+def test_proxy_functiontool_passes_annotations():
+    """FunctionTool wrapping preserves the remote tool's annotations."""
+    from mcp.types import Tool, ToolAnnotations
+    from fastmcp.tools import FunctionTool
+
+    remote = Tool(
+        name="read",
+        description="Read a file",
+        inputSchema={"type": "object", "properties": {}, "required": []},
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+        ),
+    )
+
+    combined = {
+        "type": "object",
+        "properties": {
+            "instance_id": {"type": "string", "description": "Instance ID"},
+            **dict(remote.inputSchema.get("properties", {})),
+        },
+        "required": ["instance_id"] + list(remote.inputSchema.get("required", [])),
+    }
+
+    async def handler(**kwargs):
+        return ""
+
+    ft = FunctionTool(
+        fn=handler,
+        name="filesystem__read",
+        description=remote.description or "",
+        parameters=combined,
+        annotations=remote.annotations,
+    )
+
+    assert ft.annotations is not None
+    assert ft.annotations.readOnlyHint is True
+    assert ft.annotations.destructiveHint is False
+    assert ft.annotations.idempotentHint is True

@@ -79,11 +79,58 @@ def _make_proxy_handler(
     """Create a **kwargs handler that routes to the proxied MCP inside an instance."""
     async def handler(**kwargs: Any) -> str:
         instance_id = kwargs.pop("instance_id")
-        if not Instance.load(instance_id, config):
+        instance = Instance.load(instance_id, config)
+        if instance is None:
             raise ToolError(f"Instance '{instance_id}' not found")
+
         client = pm.get_or_start(proxy_name, instance_id, cfg, config)
-        await client.ensure_connected()
-        result = await client.call_tool(remote_name, kwargs)
+        is_new_connection = not client.is_connected
+
+        # Connect (if not already connected) and audit
+        try:
+            await client.ensure_connected()
+        except Exception as e:
+            instance.audit(
+                "proxy.connection.failed",
+                proxy_name=proxy_name,
+                command=cfg.command,
+                error=str(e),
+            )
+            raise
+
+        if is_new_connection:
+            instance.audit(
+                "proxy.connected",
+                proxy_name=proxy_name,
+                command=cfg.command,
+            )
+
+        # Audit call start
+        instance.audit(
+            "proxy.call.started",
+            proxy_name=proxy_name,
+            tool_name=remote_name,
+            arguments=kwargs,
+        )
+
+        # Execute the proxied call
+        try:
+            result = await client.call_tool(remote_name, kwargs)
+        except Exception as e:
+            instance.audit(
+                "proxy.call.failed",
+                proxy_name=proxy_name,
+                tool_name=remote_name,
+                error=str(e),
+            )
+            raise
+
+        instance.audit(
+            "proxy.call.completed",
+            proxy_name=proxy_name,
+            tool_name=remote_name,
+        )
+
         texts = [
             c.text for c in (result.content or [])
             if isinstance(c, TextContent)

@@ -65,6 +65,11 @@ class ProxiedMCPClient:
         self.config = config
         self._client: Client | None = None
 
+    @property
+    def is_connected(self) -> bool:
+        """True once ensure_connected() has succeeded at least once."""
+        return self._client is not None
+
     async def ensure_connected(self) -> Client:
         """Start the process inside bwrap and connect if not already connected."""
         if self._client is not None:

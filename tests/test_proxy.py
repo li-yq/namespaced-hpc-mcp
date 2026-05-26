@@ -12,7 +12,9 @@ from pathlib import Path
 import pytest
 
 from ns_hpc.config import Config, ProxiedMCP
+from ns_hpc.instance import Instance
 from ns_hpc.proxy import discover_tools
+import json
 
 # Path to the test MCP server script
 _TEST_SERVER = Path(__file__).parent / "test_proxy_server.py"
@@ -128,3 +130,222 @@ async def test_discover_tools_creates_wrapped_tool_schema(
     assert "instance_id" in ft.parameters.get("properties", {})
     assert "message" in ft.parameters.get("properties", {})
     assert ft.parameters["required"] == ["instance_id", "message"]
+
+
+# ── Helpers for audit tests ──────────────────────────────────────────────────
+
+
+def _config(tmp_dir: str) -> Config:
+    return Config(
+        namespace={
+            "instances_dir": tmp_dir,
+            "bwrap_command": [
+                "bwrap",
+                "--unshare-all", "--share-net",
+                "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+                "--ro-bind", "/usr", "/usr",
+                "--ro-bind", "/bin", "/bin",
+                "--ro-bind", "/lib", "/lib",
+                "--ro-bind", "/lib64", "/lib64",
+            ],
+        },
+        jobs={
+            "local": {
+                "use_cgroups": False,
+                "cgroups_command": ["sh", "-c"],
+            },
+            "slurm": {
+                "sbatch_command": ["sbatch"],
+                "limit": {},
+            },
+        },
+        proxied_mcps={},
+    )
+
+
+# ── Audit logging tests ────────────────────────────────────────────────────
+
+
+class _FakeClient:
+    """Fake ProxiedMCPClient that records calls and returns canned results."""
+
+    def __init__(self, result_content: str = "", should_fail: bool = False) -> None:
+        self.result_content = result_content
+        self.should_fail = should_fail
+        self._client = None  # simulate not-connected-yet
+        self.connect_calls: int = 0
+        self.call_tool_calls: list[tuple[str, dict]] = []
+
+    @property
+    def is_connected(self) -> bool:
+        return self._client is not None
+
+    async def ensure_connected(self):
+        if self._client is not None:
+            return  # already connected
+        self.connect_calls += 1
+        if self.should_fail:
+            raise RuntimeError("connect failed")
+        self._client = object()  # mark as connected
+
+    async def call_tool(self, name: str, arguments: dict):
+        self.call_tool_calls.append((name, arguments))
+        if self.should_fail:
+            raise RuntimeError("tool call failed")
+        from mcp.types import TextContent
+        return type("_R", (), {
+            "content": [TextContent(type="text", text=self.result_content)]
+        })()
+
+
+class _FakePM:
+    """Fake ProxyManager that returns a pre-configured FakeClient."""
+
+    def __init__(self, client: _FakeClient) -> None:
+        self.client = client
+
+    def get_or_start(self, proxy_name: str, instance_id: str, cfg, config):
+        return self.client
+
+
+@pytest.mark.asyncio
+async def test_proxy_handler_audit_connected_and_completed(tmp_path, monkeypatch):
+    """Calling a proxied tool audits proxy.connected and proxy.call.completed."""
+    from ns_hpc.server import _make_proxy_handler, ServerContext
+    from ns_hpc.config import ProxiedMCP
+
+    cfg = _config(str(tmp_path))
+    inst = Instance.create("proxy-audit", cfg)
+    monkeypatch.setattr("ns_hpc.server.Instance.load", lambda iid, c: inst)
+
+    fake_client = _FakeClient(result_content="hello from proxy")
+    fake_pm = _FakePM(fake_client)
+
+    proxy_cfg = ProxiedMCP(command="echo", args=["hello"])
+    handler = _make_proxy_handler(fake_pm, "testproxy", proxy_cfg, "echo_cmd", cfg)
+
+    result = await handler(instance_id="proxy-audit", message="world")
+    assert result == "hello from proxy"
+
+    # Check audit log
+    lines = inst.audit_log_path.read_text().strip().splitlines()
+    events = [json.loads(line) for line in lines]
+    event_types = [e["event"] for e in events]
+
+    assert "proxy.connected" in event_types
+    assert "proxy.call.started" in event_types
+    assert "proxy.call.completed" in event_types
+
+    # Verify proxy.connected
+    conn = events[event_types.index("proxy.connected")]
+    assert conn["proxy_name"] == "testproxy"
+    assert conn["command"] == "echo"
+
+    # Verify proxy.call.started
+    started = events[event_types.index("proxy.call.started")]
+    assert started["proxy_name"] == "testproxy"
+    assert started["tool_name"] == "echo_cmd"
+    assert started["arguments"] == {"message": "world"}
+
+    # Verify proxy.call.completed
+    completed = events[event_types.index("proxy.call.completed")]
+    assert completed["proxy_name"] == "testproxy"
+    assert completed["tool_name"] == "echo_cmd"
+
+
+@pytest.mark.asyncio
+async def test_proxy_handler_audit_connection_failed(tmp_path, monkeypatch):
+    """A failed connection audits proxy.connection.failed and raises."""
+    from ns_hpc.server import _make_proxy_handler
+    from ns_hpc.config import ProxiedMCP
+
+    cfg = _config(str(tmp_path))
+    inst = Instance.create("proxy-connfail", cfg)
+    monkeypatch.setattr("ns_hpc.server.Instance.load", lambda iid, c: inst)
+
+    fake_client = _FakeClient(should_fail=True)
+    fake_pm = _FakePM(fake_client)
+
+    proxy_cfg = ProxiedMCP(command="nonexistent")
+    handler = _make_proxy_handler(fake_pm, "testproxy", proxy_cfg, "bad_cmd", cfg)
+
+    with pytest.raises(RuntimeError, match="connect failed"):
+        await handler(instance_id="proxy-connfail")
+
+    lines = inst.audit_log_path.read_text().strip().splitlines()
+    events = [json.loads(line) for line in lines]
+    event_types = [e["event"] for e in events]
+
+    assert "proxy.connection.failed" in event_types
+    # No call.started or call.completed because connect failed
+    assert "proxy.call.started" not in event_types
+    assert "proxy.call.completed" not in event_types
+
+    fail = events[event_types.index("proxy.connection.failed")]
+    assert fail["proxy_name"] == "testproxy"
+    assert "connect failed" in fail["error"]
+
+
+@pytest.mark.asyncio
+async def test_proxy_handler_audit_call_failed(tmp_path, monkeypatch):
+    """A failed call audits proxy.call.started + proxy.call.failed, no completed."""
+    from ns_hpc.server import _make_proxy_handler
+    from ns_hpc.config import ProxiedMCP
+
+    cfg = _config(str(tmp_path))
+    inst = Instance.create("proxy-callfail", cfg)
+    monkeypatch.setattr("ns_hpc.server.Instance.load", lambda iid, c: inst)
+
+    fake_client = _FakeClient(should_fail=True)
+    # Mark as already-connected so ensure_connected succeeds but call_tool fails
+    fake_client._client = object()
+    fake_pm = _FakePM(fake_client)
+
+    proxy_cfg = ProxiedMCP(command="echo")
+    handler = _make_proxy_handler(fake_pm, "testproxy", proxy_cfg, "failing_cmd", cfg)
+
+    with pytest.raises(RuntimeError, match="tool call failed"):
+        await handler(instance_id="proxy-callfail")
+
+    lines = inst.audit_log_path.read_text().strip().splitlines()
+    events = [json.loads(line) for line in lines]
+    event_types = [e["event"] for e in events]
+
+    assert "proxy.call.started" in event_types
+    assert "proxy.call.failed" in event_types
+    assert "proxy.call.completed" not in event_types
+
+    fail = events[event_types.index("proxy.call.failed")]
+    assert fail["proxy_name"] == "testproxy"
+    assert fail["tool_name"] == "failing_cmd"
+    assert "tool call failed" in fail["error"]
+
+
+@pytest.mark.asyncio
+async def test_proxy_handler_audit_no_connected_on_reuse(tmp_path, monkeypatch):
+    """Second call to the same proxy does NOT re-audit proxy.connected."""
+    from ns_hpc.server import _make_proxy_handler
+    from ns_hpc.config import ProxiedMCP
+
+    cfg = _config(str(tmp_path))
+    inst = Instance.create("proxy-reuse", cfg)
+    monkeypatch.setattr("ns_hpc.server.Instance.load", lambda iid, c: inst)
+
+    fake_client = _FakeClient(result_content="ok")
+    fake_pm = _FakePM(fake_client)
+
+    proxy_cfg = ProxiedMCP(command="echo")
+    handler = _make_proxy_handler(fake_pm, "testproxy", proxy_cfg, "test_cmd", cfg)
+
+    await handler(instance_id="proxy-reuse")
+    await handler(instance_id="proxy-reuse")
+
+    lines = inst.audit_log_path.read_text().strip().splitlines()
+    events = [json.loads(line) for line in lines]
+    event_types = [e["event"] for e in events]
+
+    # proxy.connected appears exactly once
+    assert event_types.count("proxy.connected") == 1
+    # proxy.call.started and completed appear twice each
+    assert event_types.count("proxy.call.started") == 2
+    assert event_types.count("proxy.call.completed") == 2

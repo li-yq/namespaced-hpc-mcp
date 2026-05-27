@@ -1,4 +1,4 @@
-"""WebDAV file server — mounts instance workspaces and extra paths via wsgidav.
+"""WebDAV file server -- mounts instance workspaces and extra paths via wsgidav.
 
 Paths served when ``dav.enabled = true``:
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -32,13 +33,12 @@ logger = logging.getLogger("ns-hpc")
 FileResource = _FileResource  # re-export
 
 
-def _validate_within_root(target_path, root_path):
+def _validate_within_root(target_path: Path, root_path: Path) -> None:
     """Raise RuntimeError if *target_path* escapes *root_path*.
 
     For non-existent paths (e.g. during PUT/CREATE), validates against the
     closest existing parent, then reconstructs the resolved target.
     """
-    from pathlib import Path
     check_path = target_path
     while not check_path.exists() and check_path != check_path.parent:
         check_path = check_path.parent
@@ -49,12 +49,11 @@ def _validate_within_root(target_path, root_path):
         resolved_target = check_path.resolve() / target_path.relative_to(check_path)
 
     resolved_root = root_path.resolve()
-    root_prefix = str(resolved_root) + "/"
+    root_prefix = str(resolved_root) + os.sep
     if not str(resolved_target).startswith(root_prefix) and resolved_target != resolved_root:
         raise RuntimeError(
             f"Security: path {target_path} resolves outside root {root_path}"
         )
-
 
 
 class SandboxDavProvider(DAVProvider):
@@ -168,6 +167,15 @@ class SandboxDavProvider(DAVProvider):
 
         if not host_path.exists():
             return None
+
+        # Audit writes to instance audit log
+        if parts[0] == "instances" and method not in (
+            "GET", "HEAD", "OPTIONS", "PROPFIND",
+        ):
+            from ns_hpc.instance import Instance
+            inst = Instance.load(parts[1], self._cfg)
+            if inst is not None:
+                inst.audit("dav.write", method=method, path=path)
 
         if host_path.is_dir():
             return FolderResource(path, environ, str(host_path))

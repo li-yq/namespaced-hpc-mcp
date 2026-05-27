@@ -1,18 +1,10 @@
 # ns-hpc MCP Server
 
-HPC sandboxing via bubblewrap — an MCP server that executes code inside
-bwrap containers with read-only system paths and an isolated workspace.
+HPC sandboxing via bubblewrap — an MCP server that manages sandbox instances
+and executes commands inside isolated bwrap containers.
 
 ```bash
-# Install from GitHub
 pip install git+https://github.com/li-yq/namespaced-hpc-mcp.git
-
-# Or with uv
-uv add git+https://github.com/li-yq/namespaced-hpc-mcp.git
-
-# Editable install from a local clone
-git clone https://github.com/li-yq/namespaced-hpc-mcp.git
-pip install -e namespaced-hpc-mcp
 ```
 
 ## Quick Start
@@ -22,40 +14,17 @@ pip install -e namespaced-hpc-mcp
 ns-hpc doctor
 
 # Create an instance and run a command
-ns-hpc bwrap my-instance -- ls -la
-ns-hpc bwrap my-instance -- python -c "print('hello from sandbox')"
+ns-hpc instance create my-inst
+ns-hpc bwrap my-inst -- ls -la
 
 # Interactive shell
-ns-hpc instance enter my-instance
+ns-hpc instance enter my-inst
 
 # Start the MCP server
 ns-hpc run                                    # stdio (default)
 ns-hpc run --transport streamable-http        # HTTP on :8000/mcp
 ns-hpc run -t streamable-http --uds /tmp/ns-hpc.sock  # Unix socket
-
-# Clean up old instances
-ns-hpc clean --days 7
 ```
-
-## Configuration
-
-Create `~/.config/ns-hpc/config.toml` (auto-discovered) or `config.toml` in the project root:
-
-```toml
-instances_dir = "${HOME}/.local/share/ns-hpc/instances"
-
-[namespace_defaults]
-bind_ro = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]
-workspace_mount = "/workspace"
-flags = ["--unshare-all", "--share-net", "--proc", "/proc",
-         "--dev", "/dev", "--tmpfs", "/tmp"]
-
-[resource_defaults]
-context_dirs = ["context"]
-resource_patterns = ["*.md"]
-```
-
-See `config/config.toml` for the full default configuration.
 
 ## Architecture
 
@@ -63,171 +32,243 @@ See `config/config.toml` for the full default configuration.
 ┌─────────────────────────────────────────────┐
 │              MCP Client (LLM)               │
 └──────────────┬──────────────────────────────┘
-               │ SSH / stdio
+               │ stdio / streamable-http / SSE
 ┌──────────────▼──────────────────────────────┐
 │          ns-hpc MCP Server                  │
 │                                             │
-│  ┌─────────────┐  ┌──────────────────────┐  │
-│  │ run_command  │  │ read/write_file      │  │
-│  │ (bwrap exec) │  │ list_directory       │  │
-│  └──────┬──────┘  └──────────┬───────────┘  │
-│         │                     │              │
-│  ┌──────▼─────────────────────▼───────────┐  │
-│  │        bwrap sandbox                   │  │
-│  │  ┌─────────────────────────────────┐   │  │
-│  │  │ /workspace (rw)                 │   │  │
-│  │  │ /usr /lib /bin /etc (ro)        │   │  │
-│  │  │ /proc /dev (namespace)          │   │  │
-│  │  │ /tmp (tmpfs)                    │   │  │
-│  │  └─────────────────────────────────┘   │  │
-│  └────────────────────────────────────────┘  │
+│  ┌──────────────────────┐  ┌─────────────┐  │
+│  │ submit_job / poll_job│  │ WebDAV /dav │  │
+│  │ (bwrap exec)         │  │ (GET/PUT)   │  │
+│  └──────────┬───────────┘  └──────┬──────┘  │
+│             │                      │        │
+│  ┌──────────▼──────────────────────▼───────┐ │
+│  │         bwrap sandbox                  │ │
+│  │  ┌──────────────────────────────────┐  │ │
+│  │  │ /workspace  (rw, bind-mounted)   │  │ │
+│  │  │ /output     (rw, bind-mounted)   │  │ │
+│  │  │ /usr /lib /bin /etc  (ro)        │  │ │
+│  │  │ /proc /dev  (virtual)            │  │ │
+│  │  │ /tmp        (tmpfs)              │  │ │
+│  │  └──────────────────────────────────┘  │ │
+│  └────────────────────────────────────────┘ │
 │                                             │
 │  ┌──────────────────────────────────────┐   │
-│  │  Instance: ~/mcp_instances/{id}/     │   │
-│  │  ├── workspace/  (host-side bind)    │   │
-│  │  ├── audit.log   (host-side only)    │   │
-│  │  └── metadata.json                   │   │
+│  │  Instance: ~/.local/share/ns-hpc/    │   │
+│  │            instances/{id}/            │   │
+│  │  ├── workspace/  (rw host-side bind) │   │
+│  │  ├── .ns_hpc_output/  (job outputs)  │   │
+│  │  ├── .ns_hpc_jobs/    (job state)    │   │
+│  │  ├── status/          (bwrap fd)     │   │
+│  │  ├── metadata.json                   │   │
+│  │  └── audit.log     (host-side only)  │   │
 │  └──────────────────────────────────────┘   │
 └─────────────────────────────────────────────┘
 ```
 
 ### Key Design Decisions
 
-- **bwrap model**: Stateless, single-shot. Every command creates a fresh
-  sandbox. No persistent namespaces needed.
-- **enter/exec are identical**: Both rebuild the same sandbox from scratch.
-- **Audit log**: Written on the host side, never bind-mounted into the
-  sandbox — the sandbox cannot tamper with its own audit trail.
-- **File path protection**: All file tools use `resolve()` + `startswith()`
-  to block path traversal attacks.
-- **MCP Proxy**: Deferred to v2. See `config.toml`'s `[proxied_mcps]` for the placeholder.
+- **Stateless bwrap**: Every command creates a fresh sandbox. No persistent
+  Linux namespaces. The kernel tears down the sandbox when the outer bwrap
+  process exits.
+- **Audit log on host**: Written outside the sandbox — the sandbox cannot
+  tamper with its own audit trail.
+- **Shared network**: `--share-net` overrides `--unshare-all`, so processes
+  inside bwrap share the host network namespace. This enables WebDAV and
+  proxied MCP servers to bind ports reachable from the host.
+
+## Configuration
+
+Configuration merges three layers (highest priority last):
+
+1. Built-in defaults
+2. `~/.config/ns-hpc/config.toml` (XDG)
+3. `NS_HPC_CONFIG` env var or `--config` CLI flag
+
+See `config/config.toml` for the full reference.
+
+```toml
+# ~/.config/ns-hpc/config.toml
+
+[namespace]
+bwrap_command = [
+    "bwrap",
+    "--unshare-all", "--share-net",
+    "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+    "--ro-bind", "/usr", "/usr",
+    "--ro-bind", "/lib", "/lib",
+    "--ro-bind", "/lib64", "/lib64",
+    "--ro-bind", "/bin", "/bin",
+    "--ro-bind", "/sbin", "/sbin",
+    "--ro-bind", "/etc", "/etc",
+]
+
+[jobs]
+max_timeout = 3600
+
+[jobs.local]
+use_cgroups = true
+cgroups_command = [
+    "systemd-run", "--user", "--scope",
+    "-p", "CPUQuota=400%",
+    "-p", "MemoryMax=8G",
+    "--",
+]
+
+[jobs.slurm]
+sbatch_command = [
+    "sbatch",
+    "--partition", "cpu",
+    "--cpus-per-task={cpus}",
+    "--mem={memory}M",
+]
+
+[jobs.slurm.limit]
+cpus = { default = 1, max = 8 }
+memory = { default = 4096, max = 32768 }
+
+# WebDAV file access (default: disabled)
+[dav]
+enabled = true
+
+[dav.extras.external-data]
+path = "/public5/home/t6s001890/data"
+ro = true
+
+[proxied_mcps.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/"]
+# include = ["read_*", "list_*"]
+# exclude = ["*_dangerous"]
+```
 
 ## CLI Reference
 
 | Command | Description |
 |---------|-------------|
 | `ns-hpc doctor` | Diagnose system prerequisites |
-| `ns-hpc bwrap <id> -- <cmd>` | Run command in bwrap sandbox (raw) |
-| `ns-hpc instance create <id>` | Create a new sandbox instance |
-| `ns-hpc instance run <id> -- <cmd>` | Run command as an async job |
-| `ns-hpc instance status <id> <job-id>` | Check job status |
-| `ns-hpc instance jobs <id>` | List tracked jobs |
-| `ns-hpc instance cancel <id> <job-id>` | Cancel a running job |
-| `ns-hpc instance enter <id>` | Interactive bash in sandbox |
-| `ns-hpc instance describe <id>` | Show instance metadata |
-| `ns-hpc instance update <id> -d <desc>` | Update instance description |
-| `ns-hpc instance archive <id>` | Archive an instance, disabling new job submissions |
-| `ns-hpc run` | Start MCP server (stdio, streamable-http, sse, or UDS) |
+| `ns-hpc bwrap <id> -- <cmd>` | Run command in raw bwrap sandbox |
+| `ns-hpc run` | Start MCP server (stdio, streamable-http, sse, UDS) |
 | `ns-hpc clean --days 7` | Remove stale instances |
+| `ns-hpc instance create <id>` | Create a new sandbox instance |
+| `ns-hpc instance list` | List all instances |
+| `ns-hpc instance list-archived` | List archived instances |
+| `ns-hpc instance describe <id>` | Show instance metadata |
+| `ns-hpc instance update <id> -d <desc>` | Update description |
+| `ns-hpc instance enter <id>` | Interactive bash in sandbox |
+| `ns-hpc instance run <id> -- <cmd>` | Run command as an async job |
+| `ns-hpc instance status <id> <job>` | Check job status |
+| `ns-hpc instance jobs <id>` | List tracked jobs |
+| `ns-hpc instance cancel <id> <job>` | Cancel a running job |
+| `ns-hpc instance archive <id>` | Archive instance (disables new jobs) |
 
 ## MCP Tools
+
+### Instance Management
 
 | Tool | Description |
 |------|-------------|
 | `create_instance` | Create a new sandbox instance |
-| `list_instances` | List all instances |
-| `update_instance` | Update instance metadata (description) |
-| `archive_instance` | Archive an instance, disabling new job submissions |
+| `list_instances` | List all active instances |
 | `list_archived_instances` | List all archived instances |
-| `submit_job` | Submit a command as an async job |
-| `poll_job` | Poll a running job (optionally wait for completion) |
+| `update_instance` | Update instance metadata (description) |
+| `archive_instance` | Archive an instance, disabling new jobs |
+
+### Job Execution
+
+| Tool | Description |
+|------|-------------|
+| `submit_job` | Submit a command as an async job (local or Slurm) |
+| `poll_job` | Poll a running job, optionally wait for completion |
 | `list_jobs` | List all tracked jobs for an instance |
 | `cancel_job` | Cancel a running job and return final output |
 
-All commands run inside isolated bwrap containers with read-only system paths.
+### File Access
+
+| Tool | Description |
+|------|-------------|
+| `filesystem__read_text_file` | Read a file from the sandbox workspace |
+| `filesystem__write_file` | Write a file to the sandbox workspace |
+| `filesystem__list_directory` | List directory contents |
+| `filesystem__*` | Additional proxied filesystem tools (search, move, etc.) |
+
+> The `filesystem__*` tools are proxied from the
+> `@modelcontextprotocol/server-filesystem` MCP server running inside bwrap.
+> They can be filtered with `include`/`exclude` patterns in config.
+
+## WebDAV File Transfer
+
+When `[dav].enabled = true` (and the server runs in HTTP mode), the WebDAV
+endpoint at `/dav/` provides direct file access from Finder, Windows
+Explorer, rclone, or curl.
+
+```
+/dav/instances/{id}/workspace/...   (read-write)
+/dav/instances/{id}/output/...      (read-write)
+/dav/{extra_name}/...               (config-controlled, defaults to ro)
+```
+
+```bash
+# Mount in Finder: ⌘K → http://127.0.0.1:8000/dav/
+# Or with curl:
+curl http://127.0.0.1:8000/dav/instances/my-inst/workspace/file.txt
+curl -T data.csv http://127.0.0.1:8000/dav/instances/my-inst/workspace/data.csv
+curl -X DELETE http://127.0.0.1:8000/dav/instances/my-inst/workspace/old.txt
+```
+
+- **Writes** (PUT, DELETE, MKCOL) are audited to the instance `audit.log`.
+- Archived instances return 404.
+- Path traversal (symlinks, `..`) is blocked.
+- Read-only extra mounts reject writes.
 
 ## Remote HPC Setup
 
-Set up ns-hpc on a login or compute node so the MCP server connects via SSH stdio.
+### 1. Install on the HPC node
 
 ```bash
-# 1. Install the package
 pip install git+https://github.com/li-yq/namespaced-hpc-mcp.git
-
-# Verify prerequisites
 ns-hpc doctor
 ```
 
-### 2. Configuration
-
-Create `~/.config/ns-hpc/config.toml` (auto-discovered) or set `NS_HPC_CONFIG`:
+### 2. Configure for your cluster
 
 ```toml
-[namespace_defaults]
-bind_ro = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]
-workspace_mount = "/workspace"
-flags = ["--unshare-all", "--share-net", "--proc", "/proc",
-         "--dev", "/dev", "--tmpfs", "/tmp"]
+# ~/.config/ns-hpc/config.toml
+[namespace]
+bwrap_command = [
+    "bwrap",
+    "--unshare-all", "--share-net",
+    "--uid", "1000", "--gid", "1000",
+    "--ro-bind", "/home/user/.local/share/ns-hpc/rootfs", "/",
+    "--ro-bind", "/home/user/.local/share/ns-hpc/agent-tools", "/opt/agent-tools",
+    "--proc", "/proc", "--dev", "/dev",
+    "--tmpfs", "/run", "--tmpfs", "/tmp",
+]
+workspace_mount = "/home/agent"
+output_mount = "/mnt/output"
+shared_output_mount = "/mnt/shared-output"
 
-[resource_defaults]
-context_dirs = ["~/.local/ns-hpc/context"]
-resource_patterns = ["*.md"]
+[jobs.slurm]
+sbatch_command = ["sbatch", "--partition", "compute", "--cpus-per-task={cpus}", "--mem={memory}M"]
 
-[slurm]
-partition = "compute"
-
-[slurm.resources.cpus]
-parameter = "--cpus-per-task={}"
-default = 1
-max = 8
-
-[slurm.resources.memory]
-parameter = "--mem={}"
-default = "4G"
-max = "32G"
+[jobs.slurm.limit]
+cpus = { default = 1, max = 32 }
+memory = { default = 4096, max = 131072 }
 ```
 
-Adjust `partition`, resource limits, and `bind_ro` to match your cluster.
-
-### 3. Resource Documents
-
-Context markdown files are exposed as MCP resources — the LLM reads them as
-reference material about your HPC environment.
+### 3. Start the server
 
 ```bash
-mkdir -p ~/.local/ns-hpc/context
-```
-
-Add files like `modules.md` (available `module load` commands),
-`filesystem.md` (scratch paths, quotas), or `slurm.md` (partitions,
-QoS policies).  Any file matching `*.md` in the context directories
-is registered as a `resource://ns-hpc/context/{filename}` resource.
-
-### 4. Proxied MCP Servers
-
-Proxied MCPs run inside the bwrap sandbox alongside user commands.
-The filesystem server is configured by default:
-
-```toml
-[proxied_mcps.filesystem]
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/"]
-```
-
-Pre-install (recommended — avoids download on every discovery):
-
-```bash
-npm install -g @modelcontextprotocol/server-filesystem
-```
-
-Then point the config directly at the binary:
-
-```toml
-[proxied_mcps.filesystem]
-command = "mcp-server-filesystem"
-args = ["/"]
-```
-
-### 5. Start the Server
-
-**Stdio (default) — for SSH-based clients:**
-
-```bash
-# Over stdio (for MCP clients connecting via SSH)
+# stdio (for SSH-based MCP clients)
 ns-hpc run
+
+# Streamable HTTP (recommended for direct HTTP)
+ns-hpc run --transport streamable-http --port 8000
+
+# With WebDAV
+ns-hpc run --transport streamable-http --port 8000  # set [dav].enabled=true
 ```
 
-Configure your MCP client (e.g. Claude Desktop, VS Code) to launch via SSH:
+### 4. MCP client config
 
 ```json
 {
@@ -240,80 +281,53 @@ Configure your MCP client (e.g. Claude Desktop, VS Code) to launch via SSH:
 }
 ```
 
-**Streamable HTTP — recommended for direct HTTP access:**
-
-```bash
-# Start on localhost:8000/mcp
-ns-hpc run --transport streamable-http
-
-# Or bind to all interfaces on a custom port
-ns-hpc run -t streamable-http --host 0.0.0.0 --port 9000
-```
-
-Client connection:
+Or for HTTP:
 
 ```json
 {
   "mcpServers": {
     "ns-hpc": {
-      "url": "http://user@hpc-login:9000/mcp"
+      "url": "http://hpc-login:8000/mcp"
     }
   }
 }
 ```
 
-**Unix Domain Socket — for local-only deployments:**
+## Development
 
 ```bash
-# Bind to a Unix socket (no TCP port needed)
-ns-hpc run -t streamable-http --uds /tmp/ns-hpc.sock
+uv sync
+uv run pytest                          # Full test suite
+uv run python -m ns_hpc doctor         # Diagnostics
+uv run python -m ns_hpc run            # Start server
 ```
 
-UDS is useful when the MCP client is on the same machine — it avoids
-exposing a TCP port and leverages filesystem permissions for access control.
+**Tests by tier:**
 
-**SSE (legacy) — for older MCP clients:**
-
-```bash
-ns-hpc run --transport sse --host 0.0.0.0 --port 8080
-```
+| Tier | Command |
+|------|---------|
+| Pure unit (no bwrap) | `uv run pytest tests/test_{config,instance,namespace,proxy,proxy_server,server,file_server}.py -v` |
+| Unit + bwrap | `uv run pytest tests/test_{job_manager,bwrap_primitive}.py -v` |
+| Full Slurm integration | `cd slurm && bash setup.sh && bash test_session.sh` |
 
 ## Security
 
 - All commands run via `bwrap --unshare-all` (user, PID, mount, IPC, UTS,
   CGROUP namespaces)
 - System paths are read-only (`--ro-bind`)
-- `/tmp` is a fresh tmpfs (no host files visible)
+- `/tmp` is a fresh tmpfs
 - Workspace is the only writable bind mount
-- Audit log is written by the host, never bind-mounted
-- Path traversal is blocked in all file tools
-- `ns-hpc doctor` validates all prerequisites before use
-
-## Development
-
-```bash
-# Setup
-uv sync
-
-# Run tests
-uv run pytest
-
-# Run diagnostics
-uv run python -m ns_hpc doctor
-
-# Run a command in sandbox
-uv run python -m ns_hpc bwrap test-instance -- echo "hello"
-
-# Start MCP server
-uv run python -m ns_hpc run
-```
+- Audit log written host-side, never exposed to sandbox
+- Path traversal blocked in filesystem and WebDAV tools
+- `ns-hpc doctor` validates prerequisites
 
 ## Requirements
 
 - Linux with user namespaces enabled
 - bwrap (bubblewrap) 0.11+
-- Python 3.12+ (developed on 3.14)
+- Python 3.12+
 - (Optional) Slurm: sbatch, squeue, sacct
+- (Optional for WebDAV) network access for Finder/rclone/curl clients
 
 ## License
 

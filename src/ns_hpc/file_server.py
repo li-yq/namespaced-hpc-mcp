@@ -74,6 +74,9 @@ class SandboxDavProvider(DAVProvider):
         self._instances_dir = config.resolve_instances_dir()
         self._output_dir = self._instances_dir / "output"
         self._extras = config.dav.extras
+        # wsgidav.fs_dav_provider checks self.provider.readonly; we handle
+        # per-mount readonly in get_resource_inst, so mark provider as rw
+        self.readonly = False
 
     def __repr__(self) -> str:
         return f"SandboxDavProvider(instances={self._instances_dir})"
@@ -134,6 +137,21 @@ class SandboxDavProvider(DAVProvider):
         relative = "/".join(parts[1:]) if len(parts) > 1 else ""
         target = root / relative if relative else root
         return target, extra.ro
+
+    def _loc_to_file_path(self, path: str, environ: dict | None = None) -> str:
+        """Map a provider-relative path to an absolute filesystem path.
+
+        Required by wsgidav.fs_dav_provider for PUT/MKCOL/create_empty_resource
+        which call the provider directly rather than going through
+        get_resource_inst.
+        """
+        resolved = self._resolve(path, environ or {})
+        if resolved is None:
+            # For create operations, the target path goes through _resolve
+            # which validates the instance exists. If it returns None,
+            # the path is invalid.
+            raise RuntimeError(f"Invalid path for DAV create: {path}")
+        return str(resolved[0])
 
     def get_resource_inst(self, path: str, environ: dict):
         """Return a DAVNonCollection or DAVCollection for *path*."""

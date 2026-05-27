@@ -38,26 +38,6 @@ class DavConfig(BaseModel):
     enabled: bool = False
     extras: dict[str, DavExtraMount] = {}
 
-class DavExtraMount(BaseModel):
-    """Extra WebDAV mount under /dav/{name}/."""
-    path: str
-    ro: bool = True
-
-
-class DavConfig(BaseModel):
-    """WebDAV file-access configuration.
-
-    When enabled, instance workspaces and output dirs are served at:
-
-        /dav/instances/{instance_id}/{workspace,output}/
-
-    Extra mounts (config-controlled) are served at:
-
-        /dav/{extra_name}/
-    """
-    enabled: bool = False
-    extras: dict[str, DavExtraMount] = {}
-
 
 class Namespace(BaseModel):
     instances_dir: str = "${HOME}/.local/share/ns-hpc/instances"

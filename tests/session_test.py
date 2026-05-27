@@ -31,25 +31,43 @@ from ns_hpc.job_manager import JobManager, JobResult, JobStatus
 # ── Config template ─────────────────────────────────────────────────────────
 
 _CONFIG_TOML = """\
+[namespace]
 instances_dir = "{instances_dir}"
-
-[namespace_defaults]
-bind_ro = ["/usr", "/bin", "/lib", "/lib64", "/etc"]
+bwrap_command = ["bwrap", "--unshare-all", "--share-net",
+    "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+    "--ro-bind", "/usr", "/usr",
+    "--ro-bind", "/bin", "/bin",
+    "--ro-bind", "/lib", "/lib",
+    "--ro-bind", "/lib64", "/lib64",
+    "--ro-bind", "/etc", "/etc",
+]
 workspace_mount = "/workspace"
-flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev",
-         "--tmpfs", "/tmp"]
+output_mount = "/output"
+shared_output_mount = "/shared-output"
 
-[proxied_mcps]
+[jobs]
+max_timeout = 3600
 
-[resource_defaults]
+[jobs.local]
+cgroups_command = ["systemd-run", "--user", "--scope",
+    "-p", "CPUQuota=400%", "-p", "MemoryMax=8G", "--"]
+
+[jobs.slurm]
+sbatch_command = ["sbatch", "--partition", "cpu",
+    "--cpus-per-task={cpus}", "--mem={memory}M"]
+
+[jobs.slurm.limit]
+cpus = {{ default = 1, max = 8 }}
+memory = {{ default = 4096, max = 32768 }}
+
+[resource]
 context_dirs = ["config/context"]
 resource_patterns = ["*.md"]
 
-[slurm]
-partition = "cpu"
+[dav]
+enabled = false
 
-[resources]
-use_systemd = false
+[proxied_mcps]
 """
 
 # Produces ~10 lines over ~20s — great for tail and timing tests.
@@ -553,7 +571,7 @@ async def main():
     print(f"Config path:     {os.environ['NS_HPC_CONFIG']}")
     print(f"Instances dir:   {cfg.resolve_instances_dir()}")
     print(f"Slurm available: {check_slurm()}")
-    print(f"Workspace mount: {cfg.namespace_defaults.workspace_mount}")
+    print(f"Workspace mount: {cfg.namespace.workspace_mount}")
     print(f"Seq command:     {_SEQ_CMD}")
     print()
 

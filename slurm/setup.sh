@@ -86,38 +86,61 @@ done
 # Write config via host temp file (avoids quoting/escaping issues)
 TMP_CONFIG="$(mktemp)"
 cat > "$TMP_CONFIG" <<'TOML'
+# ── Namespace sandbox defaults ───────────────────────────────────────────────
+[namespace]
 instances_dir = "/home/testuser/.local/share/ns-hpc/instances"
-
-[namespace_defaults]
-bind_ro = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]
+bwrap_command = [
+    "bwrap",
+    "--unshare-all", "--share-net",
+    "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+    "--ro-bind", "/usr", "/usr",
+    "--ro-bind", "/lib", "/lib",
+    "--ro-bind", "/lib64", "/lib64",
+    "--ro-bind", "/bin", "/bin",
+    "--ro-bind", "/sbin", "/sbin",
+    "--ro-bind", "/etc", "/etc",
+]
 workspace_mount = "/workspace"
-flags = ["--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+output_mount = "/output"
+shared_output_mount = "/shared-output"
 
+# ── Job execution ────────────────────────────────────────────────────────────
+[jobs]
+max_timeout = 3600
+
+[jobs.local]
+cgroups_command = [
+    "systemd-run", "--user", "--scope",
+    "-p", "CPUQuota=400%",
+    "-p", "MemoryMax=8G",
+    "--",
+]
+
+[jobs.slurm]
+sbatch_command = [
+    "sbatch",
+    "--partition", "cpu",
+    "--cpus-per-task={cpus}",
+    "--mem={memory}M",
+]
+
+[jobs.slurm.limit]
+cpus = { default = 1, max = 8 }
+memory = { default = 4096, max = 32768 }
+
+# ── Proxied MCP servers ──────────────────────────────────────────────────────
 [proxied_mcps.filesystem]
 command = "mcp-server-filesystem"
 args = ["/"]
 
-[resource_defaults]
+# ── Context resources ────────────────────────────────────────────────────────
+[resource]
 context_dirs = ["~/.local/ns-hpc/context"]
 resource_patterns = ["*.md"]
 
-[resources]
-use_systemd = false
-cpus = 4
-memory = "8G"
-
-[slurm]
-partition = "cpu"
-
-[slurm.resources.cpus]
-parameter = "--cpus-per-task={}"
-default = 1
-max = 8
-
-[slurm.resources.memory]
-parameter = "--mem={}"
-default = "4G"
-max = "32G"
+# ── WebDAV file access ───────────────────────────────────────────────────────
+[dav]
+enabled = true
 TOML
 podman cp "$TMP_CONFIG" slurm-slurmctld:"$CONFIG"
 podman exec slurm-slurmctld chown 2000:2000 "$CONFIG"

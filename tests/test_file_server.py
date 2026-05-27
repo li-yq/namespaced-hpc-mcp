@@ -318,3 +318,311 @@ def test_dav_mkcol_creates_directory(tmp_path):
     code, _, _ = _wsgi_call(app, "MKCOL", "/instances/my-inst/workspace/subdir")
     assert code in (200, 201)
     assert (instances_dir / "my-inst" / "workspace" / "subdir").is_dir()
+
+
+# -- WebDAV end-to-end via Starlette Mount + WsgiToAsgi (simulates production) --
+
+
+def _make_starlette_app(instances_dir, **dav_kw):
+    """Create a Starlette app with DAV mounted at /dav, matching production setup."""
+    import copy
+    from wsgidav.wsgidav_app import WsgiDAVApp, DEFAULT_CONFIG
+    from asgiref.wsgi import WsgiToAsgi
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+
+    extras = dav_kw.pop("extras", None)
+    cfg = _make_config(instances_dir, **dav_kw, extras=extras)
+    provider = SandboxDavProvider(cfg)
+    dav_cfg = copy.deepcopy(DEFAULT_CONFIG)
+    dav_cfg.update({
+        "provider_mapping": {"/": provider},
+        "simple_dc": {"user_mapping": {"*": True}},
+        "verbose": 1,
+        "dir_browser": {"enable": True},
+        "http_authenticator": {
+            "domain_controller": None,
+            "accept_basic": False,
+            "accept_digest": False,
+        },
+        "mount_path": None,
+    })
+    dav_app = WsgiDAVApp(dav_cfg)
+    asgi_app = WsgiToAsgi(dav_app)
+    routes = [Mount("/dav", app=asgi_app, name="dav")]
+    return Starlette(routes=routes)
+
+
+@pytest.fixture
+def starlette_client(tmp_path):
+    """Create a Starlette TestClient with DAV mounted at /dav."""
+    from starlette.testclient import TestClient
+    instances_dir = tmp_path / "instances"
+    _setup_instance(instances_dir)
+    (instances_dir / "my-inst" / "workspace" / "hello.txt").write_text("hello world")
+    (instances_dir / "my-inst" / "workspace" / "subdir").mkdir()
+    (instances_dir / "output" / "my-inst" / "result.log").write_text("done")
+    app = _make_starlette_app(instances_dir)
+    return TestClient(app, raise_server_exceptions=False), instances_dir
+
+
+def test_starlette_dav_get_file(starlette_client):
+    client, instances_dir = starlette_client
+    resp = client.get("/dav/instances/my-inst/workspace/hello.txt")
+    assert resp.status_code == 200
+    assert resp.content == b"hello world"
+
+
+def test_starlette_dav_get_nonexistent(starlette_client):
+    client, instances_dir = starlette_client
+    resp = client.get("/dav/instances/my-inst/workspace/nope.txt")
+    assert resp.status_code == 404
+
+
+def test_starlette_dav_put_and_get(starlette_client):
+    client, instances_dir = starlette_client
+    resp = client.put("/dav/instances/my-inst/workspace/new.txt", content=b"fresh")
+    assert resp.status_code in (200, 201, 204)
+    resp = client.get("/dav/instances/my-inst/workspace/new.txt")
+    assert resp.status_code == 200
+    assert resp.content == b"fresh"
+
+
+def test_starlette_dav_delete(starlette_client):
+    client, instances_dir = starlette_client
+    client.put("/dav/instances/my-inst/workspace/todelete.txt", content=b"x")
+    resp = client.delete("/dav/instances/my-inst/workspace/todelete.txt")
+    assert resp.status_code in (200, 204)
+    resp = client.get("/dav/instances/my-inst/workspace/todelete.txt")
+    assert resp.status_code == 404
+
+
+def test_starlette_dav_mkcol(starlette_client):
+    client, instances_dir = starlette_client
+    resp = client.request("MKCOL", "/dav/instances/my-inst/workspace/newdir")
+    assert resp.status_code in (200, 201)
+    assert (instances_dir / "my-inst" / "workspace" / "newdir").is_dir()
+
+
+def test_starlette_dav_propfind_directory(starlette_client):
+    client, instances_dir = starlette_client
+    resp = client.request("PROPFIND", "/dav/instances/my-inst/workspace/")
+    assert resp.status_code == 207
+    body = resp.content.decode()
+    assert "hello.txt" in body
+
+
+def test_starlette_dav_propfind_file(starlette_client):
+    client, instances_dir = starlette_client
+    resp = client.request("PROPFIND", "/dav/instances/my-inst/workspace/hello.txt")
+    assert resp.status_code == 207
+    body = resp.content.decode()
+    assert "hello.txt" in body
+
+
+def test_starlette_dav_options(starlette_client):
+    client, instances_dir = starlette_client
+    resp = client.options("/dav/instances/my-inst/workspace/")
+    assert resp.status_code == 200
+    # wsgidav returns dav: 1,2 and ms-author-via: DAV headers
+    assert resp.headers.get("dav", "") == "1,2"
+    assert resp.headers.get("ms-author-via", "") == "DAV"
+
+
+def test_starlette_dav_nonexistent_instance(starlette_client):
+    client, instances_dir = starlette_client
+    resp = client.get("/dav/instances/nope/workspace/file.txt")
+    assert resp.status_code == 404
+
+
+def test_starlette_dav_archived_instance(tmp_path):
+    from starlette.testclient import TestClient
+    instances_dir = tmp_path / "instances"
+    _setup_instance(instances_dir, "archived-inst")
+    (instances_dir / "archived-inst" / "workspace" / "x.txt").write_text("x")
+    meta = json.loads((instances_dir / "archived-inst" / "metadata.json").read_text())
+    meta["archived"] = True
+    (instances_dir / "archived-inst" / "metadata.json").write_text(json.dumps(meta))
+    app = _make_starlette_app(instances_dir)
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get("/dav/instances/archived-inst/workspace/x.txt")
+    assert resp.status_code == 404
+
+
+def test_starlette_dav_output_file(starlette_client):
+    client, instances_dir = starlette_client
+    resp = client.get("/dav/instances/my-inst/output/result.log")
+    assert resp.status_code == 200
+    assert resp.content == b"done"
+
+
+def test_starlette_dav_output_put(starlette_client):
+    client, instances_dir = starlette_client
+    resp = client.put("/dav/instances/my-inst/output/out.csv", content=b"a,b")
+    assert resp.status_code in (200, 201, 204)
+    assert (instances_dir / "output" / "my-inst" / "out.csv").read_text() == "a,b"
+
+
+def test_starlette_dav_readonly_extra_mount(tmp_path):
+    from starlette.testclient import TestClient
+    instances_dir = tmp_path / "instances"
+    (instances_dir / "output").mkdir(parents=True)
+    extra_dir = tmp_path / "readonly"
+    extra_dir.mkdir()
+    (extra_dir / "locked.txt").write_text("secret")
+    app = _make_starlette_app(instances_dir,
+                              extras={"readonly": DavExtraMount(path=str(extra_dir), ro=True)})
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get("/dav/readonly/locked.txt")
+    assert resp.status_code == 200
+    resp = client.put("/dav/readonly/locked.txt", content=b"hack")
+    assert resp.status_code == 405
+
+
+def test_starlette_dav_symlink_escape_blocked(tmp_path):
+    from starlette.testclient import TestClient
+    instances_dir = tmp_path / "instances"
+    _setup_instance(instances_dir)
+    os.symlink("/etc/passwd", str(instances_dir / "my-inst" / "workspace" / "leak"))
+    app = _make_starlette_app(instances_dir)
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get("/dav/instances/my-inst/workspace/leak")
+    assert resp.status_code == 500  # RuntimeError from validation
+
+
+def test_starlette_dav_dotdot_blocked(tmp_path):
+    from starlette.testclient import TestClient
+    instances_dir = tmp_path / "instances"
+    _setup_instance(instances_dir)
+    app = _make_starlette_app(instances_dir)
+    client = TestClient(app, raise_server_exceptions=False)
+    # ASGI layer normalizes ../ before it reaches WSGI; gets 404 (no match)
+    # or 500 if it reaches the provider's security check
+    resp = client.get("/dav/instances/my-inst/workspace/../metadata.json")
+    assert resp.status_code in (404, 500)
+
+
+def test_starlette_dav_head_file(starlette_client):
+    client, instances_dir = starlette_client
+    resp = client.head("/dav/instances/my-inst/workspace/hello.txt")
+    assert resp.status_code == 200
+    assert int(resp.headers.get("content-length", "0")) == len("hello world")
+
+
+def test_starlette_dav_binary_roundtrip(starlette_client):
+    client, instances_dir = starlette_client
+    binary_data = bytes(range(256))
+    resp = client.put("/dav/instances/my-inst/workspace/binary.bin", content=binary_data)
+    assert resp.status_code in (200, 201, 204)
+    resp = client.get("/dav/instances/my-inst/workspace/binary.bin")
+    assert resp.status_code == 200
+    assert resp.content == binary_data
+
+
+def test_starlette_dav_empty_file(starlette_client):
+    client, instances_dir = starlette_client
+    resp = client.put("/dav/instances/my-inst/workspace/empty.txt", content=b"")
+    assert resp.status_code in (200, 201, 204)
+    resp = client.get("/dav/instances/my-inst/workspace/empty.txt")
+    assert resp.status_code == 200
+    assert resp.content == b""
+
+
+def test_starlette_dav_large_file(starlette_client):
+    client, instances_dir = starlette_client
+    large_data = b"x" * 1_000_000
+    resp = client.put("/dav/instances/my-inst/workspace/large.bin", content=large_data)
+    assert resp.status_code in (200, 201, 204)
+    resp = client.get("/dav/instances/my-inst/workspace/large.bin")
+    assert resp.status_code == 200
+    assert len(resp.content) == 1_000_000
+
+
+def test_starlette_dav_overwrite_file(starlette_client):
+    client, instances_dir = starlette_client
+    client.put("/dav/instances/my-inst/workspace/overwrite.txt", content=b"v1")
+    resp = client.put("/dav/instances/my-inst/workspace/overwrite.txt", content=b"v2")
+    assert resp.status_code in (200, 201, 204)
+    resp = client.get("/dav/instances/my-inst/workspace/overwrite.txt")
+    assert resp.content == b"v2"
+
+
+def test_starlette_dav_directory_listing_empty(starlette_client):
+    client, instances_dir = starlette_client
+    empty_dir = instances_dir / "my-inst" / "workspace" / "empty-dir"
+    empty_dir.mkdir()
+    resp = client.request("PROPFIND", "/dav/instances/my-inst/workspace/empty-dir/")
+    assert resp.status_code == 207
+
+
+def test_starlette_dav_instance_dir_listing(starlette_client):
+    client, instances_dir = starlette_client
+    resp = client.request("PROPFIND", "/dav/instances/my-inst/workspace/")
+    assert resp.status_code == 207
+    body = resp.content.decode()
+    assert "subdir" in body
+
+
+def test_starlette_dav_parent_dir_traversal(starlette_client):
+    client, instances_dir = starlette_client
+    resp = client.get("/dav/instances/my-inst/workspace/subdir/../../hello.txt")
+    # ASGI layer normalizes the path; traversal is blocked either way
+    assert resp.status_code in (404, 500)
+
+
+def test_starlette_dav_put_creates_dirs(tmp_path):
+    from starlette.testclient import TestClient
+    instances_dir = tmp_path / "instances"
+    _setup_instance(instances_dir)
+    app = _make_starlette_app(instances_dir)
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.put("/dav/instances/my-inst/workspace/a/b/c/file.txt", content=b"deep")
+    # wsgidav doesn't auto-create intermediate dirs; expect 404 or 409
+    assert resp.status_code in (200, 201, 204, 404, 409)
+
+
+def test_starlette_dav_utf8_filename(starlette_client):
+    client, instances_dir = starlette_client
+    resp = client.put("/dav/instances/my-inst/workspace/%E4%B8%AD%E6%96%87.txt",
+                      content=b"unicode")
+    assert resp.status_code in (200, 201, 204)
+    resp = client.get("/dav/instances/my-inst/workspace/%E4%B8%AD%E6%96%87.txt")
+    assert resp.status_code == 200
+    assert resp.content == b"unicode"
+
+
+def test_starlette_dav_special_chars_filename(starlette_client):
+    client, instances_dir = starlette_client
+    name = "file (1) - copy.txt"
+    from urllib.parse import quote
+    url = "/dav/instances/my-inst/workspace/" + quote(name)
+    resp = client.put(url, content=b"special")
+    assert resp.status_code in (200, 201, 204)
+    resp = client.get(url)
+    assert resp.status_code == 200
+    assert resp.content == b"special"
+
+
+def test_starlette_dav_audit_log_on_write(starlette_client):
+    client, instances_dir = starlette_client
+    audit_path = instances_dir / "my-inst" / "audit.log"
+    resp = client.put("/dav/instances/my-inst/workspace/audited.txt", content=b"data")
+    assert resp.status_code in (200, 201, 204)
+    assert audit_path.exists()
+    events = [json.loads(line) for line in audit_path.read_text().strip().split("\n") if line]
+    write_events = [e for e in events if e["event"] == "dav.write"]
+    assert len(write_events) >= 1
+    assert write_events[0]["method"] == "PUT"
+
+
+# -- Config-driven DAV gating --
+
+
+def test_config_dav_disabled_by_default():
+    cfg = _make_config(Path("/tmp"), dav_enabled=False)
+    assert cfg.dav.enabled is False
+
+
+def test_config_dav_enabled_explicitly():
+    cfg = _make_config(Path("/tmp"), dav_enabled=True)
+    assert cfg.dav.enabled is True

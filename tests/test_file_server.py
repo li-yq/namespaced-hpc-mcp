@@ -327,9 +327,9 @@ def _make_starlette_app(instances_dir, **dav_kw):
     """Create a Starlette app with DAV mounted at /dav, matching production setup."""
     import copy
     from wsgidav.wsgidav_app import WsgiDAVApp, DEFAULT_CONFIG
-    from asgiref.wsgi import WsgiToAsgi
     from starlette.applications import Starlette
     from starlette.routing import Mount
+    from ns_hpc.file_server import PooledWSGIApp
 
     extras = dav_kw.pop("extras", None)
     cfg = _make_config(instances_dir, **dav_kw, extras=extras)
@@ -348,7 +348,7 @@ def _make_starlette_app(instances_dir, **dav_kw):
         "mount_path": None,
     })
     dav_app = WsgiDAVApp(dav_cfg)
-    asgi_app = WsgiToAsgi(dav_app)
+    asgi_app = PooledWSGIApp(dav_app, max_workers=10)
     routes = [Mount("/dav", app=asgi_app, name="dav")]
     return Starlette(routes=routes)
 
@@ -626,3 +626,143 @@ def test_config_dav_disabled_by_default():
 def test_config_dav_enabled_explicitly():
     cfg = _make_config(Path("/tmp"), dav_enabled=True)
     assert cfg.dav.enabled is True
+
+
+# -- PooledWSGIApp / _build_environ --
+
+
+def test_build_environ_basic():
+    """Verify _build_environ produces a correct WSGI environ."""
+    from ns_hpc.file_server import _build_environ
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "method": "PROPFIND",
+        "path": "/instances/my-inst/workspace/",
+        "root_path": "/dav",
+        "query_string": b"",
+        "http_version": "1.1",
+        "scheme": "http",
+        "server": ("localhost", 8000),
+        "client": ("127.0.0.1", 54321),
+        "headers": [
+            (b"host", b"localhost:8000"),
+            (b"depth", b"1"),
+        ],
+    }
+    env = _build_environ(scope, b"")
+    assert env["REQUEST_METHOD"] == "PROPFIND"
+    assert env["SCRIPT_NAME"] == "/dav"
+    assert env["PATH_INFO"] == "/instances/my-inst/workspace/"
+    assert env["HTTP_HOST"] == "localhost:8000"
+    assert env["HTTP_DEPTH"] == "1"
+    assert env["wsgi.multithread"] is True
+
+
+def test_build_environ_no_root_path():
+    """Verify SCRIPT_NAME is empty when scope has no root_path."""
+    from ns_hpc.file_server import _build_environ
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "method": "GET",
+        "path": "/file.txt",
+        "root_path": "",
+        "query_string": b"",
+        "http_version": "1.1",
+        "scheme": "http",
+        "server": ("localhost", 8000),
+        "headers": [],
+    }
+    env = _build_environ(scope, b"")
+    assert env["SCRIPT_NAME"] == ""
+    assert env["PATH_INFO"] == "/file.txt"
+
+
+def test_build_environ_content_headers():
+    """Verify content-type and content-length are mapped to WSGI keys."""
+    from ns_hpc.file_server import _build_environ
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "method": "PUT",
+        "path": "/file.txt",
+        "root_path": "",
+        "query_string": b"",
+        "http_version": "1.1",
+        "scheme": "http",
+        "server": ("localhost", 8000),
+        "headers": [
+            (b"content-type", b"text/plain"),
+            (b"content-length", b"5"),
+        ],
+    }
+    env = _build_environ(scope, b"hello")
+    assert env["CONTENT_TYPE"] == "text/plain"
+    assert env["CONTENT_LENGTH"] == "5"
+    assert env["wsgi.input"].read() == b"hello"
+
+
+def test_pooled_wsgi_app_depth_defaults_to_one(tmp_path):
+    """Verify PooledWSGIApp defaults PROPFIND Depth to 1."""
+    from ns_hpc.file_server import PooledWSGIApp
+    from starlette.testclient import TestClient
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+
+    instances_dir = tmp_path / "instances"
+    _setup_instance(instances_dir)
+    (instances_dir / "my-inst" / "workspace" / "a.txt").write_text("a")
+    (instances_dir / "my-inst" / "workspace" / "sub" / "b.txt").parent.mkdir(exist_ok=True)
+    (instances_dir / "my-inst" / "workspace" / "sub" / "b.txt").write_text("b")
+
+    app = _make_starlette_app(instances_dir)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    # PROPFIND without Depth header should NOT return sub/b.txt (depth=1 cap)
+    resp = client.request("PROPFIND", "/dav/instances/my-inst/workspace/")
+    assert resp.status_code == 207
+    body = resp.content.decode()
+    assert "a.txt" in body
+    # subdir entry itself is listed as an immediate child
+    assert "sub" in body
+    # nested b.txt should NOT appear (depth=1, not infinity)
+    assert "sub/b.txt" not in body
+
+
+@pytest.mark.asyncio
+async def test_pooled_wsgi_app_get_response():
+    """Verify PooledWSGIApp returns correct content for a GET."""
+    from ns_hpc.file_server import PooledWSGIApp
+    from wsgidav.wsgidav_app import WsgiDAVApp, DEFAULT_CONFIG
+
+    instances_dir = Path(tmp_path := __import__("tempfile").mkdtemp())
+    _setup_instance(instances_dir)
+    (instances_dir / "my-inst" / "workspace" / "test.txt").write_text("hello pool")
+
+    cfg = _make_config(instances_dir)
+    provider = SandboxDavProvider(cfg)
+    dav_cfg = dict(DEFAULT_CONFIG)
+    dav_cfg.update({
+        "provider_mapping": {"/": provider},
+        "simple_dc": {"user_mapping": {"*": True}},
+        "verbose": 1,
+        "mount_path": None,
+    })
+    wsgi_app = WsgiDAVApp(dav_cfg)
+    asgi_app = PooledWSGIApp(wsgi_app, max_workers=2)
+
+    # Use Starlette TestClient for the ASGI interface
+    from starlette.testclient import TestClient
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+    app = Starlette(routes=[Mount("/dav", app=asgi_app, name="dav")])
+    client = TestClient(app, raise_server_exceptions=False)
+
+    resp = client.get("/dav/instances/my-inst/workspace/test.txt")
+    assert resp.status_code == 200
+    assert resp.content == b"hello pool"
+
+    # Cleanup temp dir
+    import shutil
+    shutil.rmtree(tmp_path)

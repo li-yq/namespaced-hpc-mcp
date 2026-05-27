@@ -238,9 +238,8 @@ def _mount_dav(server: FastMCP, config: Config) -> None:
     """Mount a WebDAV app at /dav/ for direct file access."""
     import copy
     from wsgidav.wsgidav_app import WsgiDAVApp, DEFAULT_CONFIG
-    from asgiref.wsgi import WsgiToAsgi
     from starlette.routing import Mount
-    from ns_hpc.file_server import SandboxDavProvider
+    from ns_hpc.file_server import SandboxDavProvider, PooledWSGIApp
 
     provider = SandboxDavProvider(config)
     dav_cfg = copy.deepcopy(DEFAULT_CONFIG)
@@ -257,7 +256,7 @@ def _mount_dav(server: FastMCP, config: Config) -> None:
         "mount_path": None,
     })
     dav_app = WsgiDAVApp(dav_cfg)
-    asgi_app = WsgiToAsgi(dav_app)
+    asgi_app = PooledWSGIApp(dav_app, max_workers=10)
     server._additional_http_routes.append(Mount("/dav", app=asgi_app, name="dav"))
     logger = logging.getLogger("ns-hpc")
     logger.info("WebDAV mounted at /dav/")

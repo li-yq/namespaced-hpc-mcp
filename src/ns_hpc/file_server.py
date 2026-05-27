@@ -6,18 +6,21 @@ Paths served when ``dav.enabled = true``:
     /dav/instances/{instance_id}/output/...      (rw)
     /dav/{extra_name}/...                        (rw/ro, config-driven)
 
-The wsgidav WSGI app is wrapped with ``asgiref.wsgi.WsgiToAsgi`` and mounted
-on the Starlette app via ``starlette.routing.Mount``.
+The wsgidav WSGI app is wrapped with ``PooledWSGIApp`` (a multi-threaded ASGI
+bridge) and mounted on the Starlette app via ``starlette.routing.Mount``.
 """
 
 from __future__ import annotations
 
+import asyncio
+import io
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from wsgidav.dav_error import DAVError, HTTP_METHOD_NOT_ALLOWED
 from wsgidav.dav_provider import DAVProvider
@@ -25,12 +28,122 @@ from wsgidav.fs_dav_provider import FileResource as _FileResource
 from wsgidav.fs_dav_provider import FolderResource
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ns_hpc.config import Config
+
+    from starlette.types import Receive, Scope, Send
 
 
 logger = logging.getLogger("ns-hpc")
 
 FileResource = _FileResource  # re-export
+
+
+def _build_environ(scope: Scope, body: bytes) -> dict[str, Any]:
+    """Build a WSGI environ dict from an ASGI scope and request body."""
+    script_name = scope.get("root_path", "").encode("utf8").decode("latin1")
+    path_info = scope["path"].encode("utf8").decode("latin1")
+    if path_info.startswith(script_name):
+        path_info = path_info[len(script_name):]
+
+    environ: dict[str, Any] = {
+        "REQUEST_METHOD": scope["method"],
+        "SCRIPT_NAME": script_name,
+        "PATH_INFO": path_info,
+        "QUERY_STRING": scope["query_string"].decode("ascii"),
+        "SERVER_PROTOCOL": f"HTTP/{scope['http_version']}",
+        "wsgi.version": (1, 0),
+        "wsgi.url_scheme": scope.get("scheme", "http"),
+        "wsgi.input": io.BytesIO(body),
+        "wsgi.errors": io.StringIO(),
+        "wsgi.multithread": True,
+        "wsgi.multiprocess": True,
+        "wsgi.run_once": False,
+    }
+
+    server = scope.get("server") or ("localhost", 80)
+    environ["SERVER_NAME"] = server[0]
+    environ["SERVER_PORT"] = str(server[1])
+
+    if scope.get("client"):
+        environ["REMOTE_ADDR"] = scope["client"][0]
+
+    for name, value in scope.get("headers", []):
+        name = name.decode("latin1")
+        if name == "content-length":
+            environ["CONTENT_LENGTH"] = value.decode("latin1")
+        elif name == "content-type":
+            environ["CONTENT_TYPE"] = value.decode("latin1")
+        else:
+            key = f"HTTP_{name}".upper().replace("-", "_")
+            existing = environ.get(key)
+            val = value.decode("latin1")
+            environ[key] = f"{existing},{val}" if existing else val
+
+    return environ
+
+
+class PooledWSGIApp:
+    """ASGI wrapper around a WSGI app with a dedicated thread pool.
+
+    Unlike ``asgiref.wsgi.WsgiToAsgi`` (which uses a ``thread_sensitive``
+    single-thread executor), this wrapper uses a configurable thread pool so
+    that concurrent requests — e.g. multiple WebDAV file transfers — don't
+    stall waiting for a slow I/O operation.
+
+    Additionally, PROPFIND Depth defaults to ``"1"`` instead of
+    ``"infinity"`` (RFC 4918) to avoid accidentally walking deep
+    directory trees on NFS-backed mounts.
+    """
+
+    def __init__(self, wsgi_app: Callable[..., Any], max_workers: int = 10) -> None:
+        self._wsgi_app = wsgi_app
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        body = b""
+        more_body = True
+        while more_body:
+            message = await receive()
+            body += message.get("body", b"")
+            more_body = message.get("more_body", False)
+
+        environ = _build_environ(scope, body)
+        # Cap PROPFIND depth to 1 instead of infinity (RFC 4918 §9.1)
+        if environ.get("REQUEST_METHOD") == "PROPFIND":
+            environ.setdefault("HTTP_DEPTH", "1")
+
+        loop = asyncio.get_running_loop()
+        start_event = asyncio.Event()
+        resp: dict[str, Any] = {}
+
+        def start_response(
+            status: str, headers: list[tuple[str, str]], exc_info: Any = None
+        ) -> None:
+            if resp:
+                return
+            resp["status"] = int(status.split()[0])
+            resp["headers"] = [
+                (k.encode("latin1"), v.encode("latin1")) for k, v in headers
+            ]
+            loop.call_soon_threadsafe(start_event.set)
+
+        chunks_future = loop.run_in_executor(
+            self._executor,
+            lambda: list(self._wsgi_app(environ, start_response)),
+        )
+
+        await start_event.wait()
+        await send({
+            "type": "http.response.start",
+            "status": resp["status"],
+            "headers": resp["headers"],
+        })
+
+        for chunk in await chunks_future:
+            await send({"type": "http.response.body", "body": chunk, "more_body": True})
+        await send({"type": "http.response.body", "body": b""})
 
 
 def _validate_within_root(target_path: Path, root_path: Path) -> None:

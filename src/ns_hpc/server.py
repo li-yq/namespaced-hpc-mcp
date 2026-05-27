@@ -211,7 +211,7 @@ async def _register_proxied_tools(server: FastMCP, config: Config) -> ProxyManag
             combined_schema = {
                 "type": "object",
                 "properties": {
-                    "instance_id": {"type": "string", "description": "Instance ID"},
+                    "instance_id": {"type": "string", "description": "Sandbox instance ID"},
                     **orig_props,
                 },
                 "required": ["instance_id"] + orig_required,
@@ -254,7 +254,7 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[ServerContext]:
 # Create the MCP server with lifespan
 mcp = FastMCP(
     name="ns-hpc",
-    instructions="HPC sandboxing via bubblewrap — manage instances and execute commands in isolated bwrap containers.",
+    instructions="HPC sandboxing via bubblewrap — manage instances and execute commands in isolated bwrap namespaces. Detailed usage instructions are available as resources.",
     lifespan=server_lifespan,
 )
 
@@ -322,7 +322,7 @@ class ListArchivedInstancesInput(BaseModel):
 
 @mcp.tool(annotations={"readOnlyHint": True})
 async def list_archived_instances(input: ListArchivedInstancesInput, ctx: Context) -> str:
-    """List all archived (previously destroyed) sandbox instances."""
+    """List all archived sandbox instances."""
     context: ServerContext = ctx.lifespan_context
 
     archived = Instance.list_archived_instances(context.config)
@@ -353,11 +353,7 @@ class ArchiveInstanceInput(BaseModel):
 
 @mcp.tool()
 async def archive_instance(input: ArchiveInstanceInput, ctx: Context) -> str:
-    """Archive a sandbox instance, disabling new job submissions.
-
-    Fails with an error if the instance has any running jobs — cancel
-    or wait for them before archiving.
-    """
+    """Archive a sandbox instance, disabling new job submissions."""
     context: ServerContext = ctx.lifespan_context
 
     instance = Instance.load(input.instance_id, context.config)
@@ -387,7 +383,7 @@ class UpdateInstanceInput(BaseModel):
 
 @mcp.tool()
 async def update_instance(input: UpdateInstanceInput, ctx: Context) -> str:
-    """Update an instance's metadata (e.g. description)."""
+    """Update or get an instance's metadata (currently only description)."""
     context: ServerContext = ctx.lifespan_context
 
     instance = Instance.load(input.instance_id, context.config)
@@ -409,7 +405,7 @@ class SubmitJobInput(BaseModel):
     command: str = Field(..., description="Shell command to run inside the bwrap sandbox")
     mode: str = Field(
         default="local",
-        description="Execution mode: 'local' (bwrap) or 'slurm' (sbatch)",
+        description="Execution mode: 'local' (run at HPC login node) or 'slurm' (submitted via sbatch)",
     )
     timeout: int = Field(
         default=60,
@@ -419,7 +415,7 @@ class SubmitJobInput(BaseModel):
     )
     detach: bool = Field(
         default=True,
-        description="If True, keep job running past timeout instead of killing",
+        description="If True, keep job running past timeout instead of killing. Use ``poll_job`` to check on it later.",
     )
     tail: int = Field(
         default=50,
@@ -429,7 +425,7 @@ class SubmitJobInput(BaseModel):
     )
     slurm_resources: dict[str, int] | None = Field(
         default=None,
-        description="Per-job resource overrides for Slurm (e.g. {'cpus': 4, 'memory': 8192}) — integers only",
+        description="Per-job resource overrides for Slurm (e.g. {'cpus': 4, 'memory': 8192}) — integers only. See resource document for cluster-specific required fields.",
     )
 
 
@@ -443,18 +439,7 @@ def _cap_timeout(timeout: int, config: Config) -> tuple[int, str]:
 
 @mcp.tool()
 async def submit_job(input: SubmitJobInput, ctx: Context) -> dict:
-    """Submit a command as an async (non-blocking) job.
-
-    Uses asyncio under the hood — the MCP server stays responsive even
-    during long-running commands.  stdout/stderr are written directly
-    to disk files.
-
-    When ``detach=True`` (default): if the job exceeds timeout, it keeps
-    running in the background.  Use ``poll_job`` to check on it later.
-
-    When ``detach=False``: if the job exceeds timeout, it is killed and
-    partial output is returned.
-    """
+    """Submit a command as an async (non-blocking) job."""
     config: Config = ctx.lifespan_context.config
 
     instance = Instance.load(input.instance_id, config)
@@ -524,11 +509,7 @@ class PollJobInput(BaseModel):
 
 @mcp.tool()
 async def poll_job(input: PollJobInput, ctx: Context) -> dict:
-    """Poll a running job.  Optionally wait for completion.
-
-    Uses asyncio under the hood — the MCP server stays responsive.
-    Same timeout/detach semantics as submit_job.
-    """
+    """Poll a running job.  Optionally wait for completion."""
     config: Config = ctx.lifespan_context.config
 
     instance = Instance.load(input.instance_id, config)
@@ -595,11 +576,7 @@ class CancelJobInput(BaseModel):
 
 @mcp.tool()
 async def cancel_job(input: CancelJobInput, ctx: Context) -> dict:
-    """Cancel a running job and return its final status and output tail.
-
-    Uses asyncio under the hood — the MCP server stays responsive.
-    Safe to call on already-finished jobs (no-op, returns current status).
-    """
+    """Cancel a running job and return its final status and output tail."""
     config: Config = ctx.lifespan_context.config
 
     instance = Instance.load(input.instance_id, config)

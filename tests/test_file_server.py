@@ -345,7 +345,7 @@ def _make_starlette_app(instances_dir, **dav_kw):
             "accept_basic": False,
             "accept_digest": False,
         },
-        "mount_path": None,
+        "mount_path": "/dav",
     })
     dav_app = WsgiDAVApp(dav_cfg)
     asgi_app = PooledWSGIApp(dav_app, max_workers=10)

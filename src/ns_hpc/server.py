@@ -253,7 +253,7 @@ def _mount_dav(server: FastMCP, config: Config) -> None:
             "accept_basic": False,
             "accept_digest": False,
         },
-        "mount_path": None,
+        "mount_path": "/dav",
     })
     dav_app = WsgiDAVApp(dav_cfg)
     asgi_app = PooledWSGIApp(dav_app, max_workers=10)

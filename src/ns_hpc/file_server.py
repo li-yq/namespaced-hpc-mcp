@@ -75,8 +75,6 @@ class SandboxDavProvider(DAVProvider):
         self._instances_dir = config.resolve_instances_dir()
         self._output_dir = self._instances_dir / "output"
         self._extras = config.dav.extras
-        self._ws_mount = config.namespace.workspace_mount.lstrip("/")
-        self._out_mount = config.namespace.output_mount.lstrip("/")
 
     def __repr__(self) -> str:
         return f"SandboxDavProvider(instances={self._instances_dir})"
@@ -116,9 +114,9 @@ class SandboxDavProvider(DAVProvider):
         if meta.get("archived"):
             return None
 
-        if mount_name == self._ws_mount:
+        if mount_name == "workspace":
             root = inst_base / "workspace"
-        elif mount_name == self._out_mount:
+        elif mount_name == "output":
             root = self._output_dir / instance_id
         else:
             return None
@@ -150,9 +148,9 @@ class SandboxDavProvider(DAVProvider):
         if parts[0] == "instances" and len(parts) >= 3:
             instance_id = parts[1]
             mount_name = parts[2]
-            if mount_name == self._ws_mount:
+            if mount_name == "workspace":
                 root_path = self._instances_dir / instance_id / "workspace"
-            elif mount_name == self._out_mount:
+            elif mount_name == "output":
                 root_path = self._output_dir / instance_id
             else:
                 return None

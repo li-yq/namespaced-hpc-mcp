@@ -271,10 +271,6 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[ServerContext]:
     _register_context_resources(server, config, config_path)
     proxy_manager = await _register_proxied_tools(server, config)
 
-    # Mount WebDAV file access under /dav/ (only effective in HTTP mode)
-    if config.dav.enabled:
-        _mount_dav(server, config)
-
     context = ServerContext(
         config=config, config_path=config_path,
         proxy_manager=proxy_manager,
@@ -655,18 +651,19 @@ def run_server(
     """
     _enable_debug_logging()
 
-    if config_path is not None:
-        load_config(config_path)  # validate early, ignore result
-
     if transport not in ("stdio", "streamable-http", "sse"):
         raise ValueError(
             f"Unknown transport: {transport!r}. "
             f"Must be one of: stdio, streamable-http, sse"
         )
 
-    if transport == "stdio":
-        mcp.run(transport="stdio")
-    else:
+    if transport != "stdio":
+        # Load the config before creating the HTTP app so we can register
+        # additional routes (e.g. DAV) before FastMCP snapshots the route table.
+        cfg = load_config(config_path)
+        if cfg.dav.enabled:
+            _mount_dav(mcp, cfg)
+
         mcp.run(
             transport=transport,
             host=host,
@@ -674,3 +671,5 @@ def run_server(
             path=path,
             uvicorn_config={"uds": uds} if uds else None,
         )
+    else:
+        mcp.run(transport="stdio")

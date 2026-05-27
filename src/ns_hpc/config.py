@@ -18,6 +18,47 @@ class ProxiedMCP(BaseModel):
     exclude: list[str] = []
 
 
+class DavExtraMount(BaseModel):
+    """Extra WebDAV mount under /dav/{name}/."""
+    path: str
+    ro: bool = True
+
+
+class DavConfig(BaseModel):
+    """WebDAV file-access configuration.
+
+    When enabled, instance workspaces and output dirs are served at:
+
+        /dav/instances/{instance_id}/{workspace,output}/
+
+    Extra mounts (config-controlled) are served at:
+
+        /dav/{extra_name}/
+    """
+    enabled: bool = False
+    extras: dict[str, DavExtraMount] = {}
+
+class DavExtraMount(BaseModel):
+    """Extra WebDAV mount under /dav/{name}/."""
+    path: str
+    ro: bool = True
+
+
+class DavConfig(BaseModel):
+    """WebDAV file-access configuration.
+
+    When enabled, instance workspaces and output dirs are served at:
+
+        /dav/instances/{instance_id}/{workspace,output}/
+
+    Extra mounts (config-controlled) are served at:
+
+        /dav/{extra_name}/
+    """
+    enabled: bool = False
+    extras: dict[str, DavExtraMount] = {}
+
+
 class Namespace(BaseModel):
     instances_dir: str = "${HOME}/.local/share/ns-hpc/instances"
     bwrap_command: list[str]
@@ -58,6 +99,7 @@ class Config(BaseModel):
     namespace: Namespace
     jobs: JobsConfig
     resource: ResourceConfig = ResourceConfig()
+    dav: DavConfig = DavConfig()
     proxied_mcps: dict[str, ProxiedMCP]
 
     def resolve_instances_dir(self) -> Path:

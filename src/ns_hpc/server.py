@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
 
+import logging
 from fastmcp import FastMCP, Context
 from fastmcp.exceptions import ToolError
 from fastmcp.resources import FileResource
@@ -232,6 +233,35 @@ async def _register_proxied_tools(server: FastMCP, config: Config) -> ProxyManag
     return pm
 
 
+
+def _mount_dav(server: FastMCP, config: Config) -> None:
+    """Mount a WebDAV app at /dav/ for direct file access."""
+    import copy
+    from wsgidav.wsgidav_app import WsgiDAVApp, DEFAULT_CONFIG
+    from asgiref.wsgi import WsgiToAsgi
+    from starlette.routing import Mount
+    from ns_hpc.file_server import SandboxDavProvider
+
+    provider = SandboxDavProvider(config)
+    dav_cfg = copy.deepcopy(DEFAULT_CONFIG)
+    dav_cfg.update({
+        "provider_mapping": {"/": provider},
+        "simple_dc": {"user_mapping": {"*": True}},
+        "verbose": 1,
+        "dir_browser": {"enable": True},
+        "http_authenticator": {
+            "domain_controller": None,
+            "accept_basic": False,
+            "accept_digest": False,
+        },
+        "mount_path": None,
+    })
+    dav_app = WsgiDAVApp(dav_cfg)
+    asgi_app = WsgiToAsgi(dav_app)
+    server._additional_http_routes.append(Mount("/dav", app=asgi_app, name="dav"))
+    logger = logging.getLogger("ns-hpc")
+    logger.info("WebDAV mounted at /dav/")
+
 @asynccontextmanager
 async def server_lifespan(server: FastMCP) -> AsyncIterator[ServerContext]:
     """Initialize server context and register context resources."""
@@ -240,6 +270,10 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[ServerContext]:
 
     _register_context_resources(server, config, config_path)
     proxy_manager = await _register_proxied_tools(server, config)
+
+    # Mount WebDAV file access under /dav/ (only effective in HTTP mode)
+    if config.dav.enabled:
+        _mount_dav(server, config)
 
     context = ServerContext(
         config=config, config_path=config_path,

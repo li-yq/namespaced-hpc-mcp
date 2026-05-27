@@ -5,10 +5,12 @@ description = "HPC sandboxing via bubblewrap — MCP server and CLI tools"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "asgiref>=3.11.1",
     "fastmcp>=3.2.4",
     "pydantic>=2.13.4",
     "tomli>=2.4.1",
     "typer>=0.25.1",
+    "wsgidav>=4.3.4",
 ]
 
 [build-system]

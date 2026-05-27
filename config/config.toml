@@ -111,3 +111,16 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/"]
 context_dirs = ["context"]
 # File patterns matched when registering resources.
 # resource_patterns = ["*.md"]
+
+# ── WebDAV file access ───────────────────────────────────────────────────────
+[dav]
+# Enable WebDAV file access under /dav/ (only effective with HTTP transports).
+# Instance workspaces are served at /dav/instances/{id}/workspace/ and
+# /dav/instances/{id}/output/ — both read-write.  Archived instances are
+# excluded automatically.
+# enabled = false
+
+# Extra static mounts served at /dav/{name}/.  Set ro=false for read-write.
+# [dav.extras.external-data]
+# path = "/mnt/external-data"
+# ro = true

@@ -334,8 +334,14 @@ class SandboxDavProvider(DAVProvider):
                 inst.audit("dav.write", method=method, path=path)
 
         if host_path.is_dir():
-            return FolderResource(path, environ, str(host_path))
-        return FileResource(path, environ, str(host_path))
+            res: Any = FolderResource(path, environ, str(host_path))
+        else:
+            res = FileResource(path, environ, str(host_path))
+        # _FileResource.__init__ overrides name with os.path.basename(_file_path);
+        # restore the name from the virtual URL path so directory listings show
+        # the correct display name (e.g. "output" not "explore-01").
+        res.name = path.strip("/").split("/")[-1]
+        return res
 
 
 def _load_instance(instance_id: str, config: Config):

@@ -628,7 +628,99 @@ def test_config_dav_enabled_explicitly():
     assert cfg.dav.enabled is True
 
 
-# -- PooledWSGIApp / _build_environ --
+# -- Virtual directory listings --
+
+
+def test_starlette_dav_root_listing(tmp_path):
+    """PROPFIND on /dav/ lists instances/ and extra mounts."""
+    from starlette.testclient import TestClient
+    instances_dir = tmp_path / "instances"
+    _setup_instance(instances_dir)
+    extra_dir = tmp_path / "data"
+    extra_dir.mkdir()
+    extras = {"data": DavExtraMount(path=str(extra_dir), ro=True)}
+    app = _make_starlette_app(instances_dir, extras=extras)
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.request("PROPFIND", "/dav/")
+    assert resp.status_code == 207
+    body = resp.content.decode()
+    assert "instances" in body
+    assert "data" in body
+
+
+def test_starlette_dav_instances_listing(tmp_path):
+    """PROPFIND on /dav/instances/ lists active instances."""
+    from starlette.testclient import TestClient
+    instances_dir = tmp_path / "instances"
+    _setup_instance(instances_dir, "inst-a")
+    _setup_instance(instances_dir, "inst-b")
+    app = _make_starlette_app(instances_dir)
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.request("PROPFIND", "/dav/instances/")
+    assert resp.status_code == 207
+    body = resp.content.decode()
+    assert "inst-a" in body
+    assert "inst-b" in body
+
+
+def test_starlette_dav_instances_omits_archived(tmp_path):
+    """Archived instances should not appear in /dav/instances/ listing."""
+    from starlette.testclient import TestClient
+    instances_dir = tmp_path / "instances"
+    _setup_instance(instances_dir, "active-inst")
+    _setup_instance(instances_dir, "archived-inst")
+    meta = json.loads((instances_dir / "archived-inst" / "metadata.json").read_text())
+    meta["archived"] = True
+    (instances_dir / "archived-inst" / "metadata.json").write_text(json.dumps(meta))
+    app = _make_starlette_app(instances_dir)
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.request("PROPFIND", "/dav/instances/")
+    assert resp.status_code == 207
+    body = resp.content.decode()
+    assert "active-inst" in body
+    assert "archived-inst" not in body
+
+
+def test_starlette_dav_instance_mount_listing(tmp_path):
+    """PROPFIND on /dav/instances/{id}/ lists workspace and output."""
+    from starlette.testclient import TestClient
+    instances_dir = tmp_path / "instances"
+    _setup_instance(instances_dir)
+    (instances_dir / "my-inst" / "workspace" / "f.txt").write_text("x")
+    (instances_dir / "output" / "my-inst").mkdir(parents=True, exist_ok=True)
+    (instances_dir / "output" / "my-inst" / "out.log").write_text("done")
+    app = _make_starlette_app(instances_dir)
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.request("PROPFIND", "/dav/instances/my-inst/")
+    assert resp.status_code == 207
+    body = resp.content.decode()
+    assert "workspace" in body
+    assert "output" in body
+
+
+def test_starlette_dav_instance_mount_nonexistent(tmp_path):
+    """GET on /dav/instances/nope/ returns 404."""
+    from starlette.testclient import TestClient
+    instances_dir = tmp_path / "instances"
+    (instances_dir / "output").mkdir(parents=True)
+    app = _make_starlette_app(instances_dir)
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get("/dav/instances/nope/")
+    assert resp.status_code == 404
+
+
+def test_starlette_dav_instance_mount_archived(tmp_path):
+    """Archived instance mount should return 404."""
+    from starlette.testclient import TestClient
+    instances_dir = tmp_path / "instances"
+    _setup_instance(instances_dir, "archived-inst")
+    meta = json.loads((instances_dir / "archived-inst" / "metadata.json").read_text())
+    meta["archived"] = True
+    (instances_dir / "archived-inst" / "metadata.json").write_text(json.dumps(meta))
+    app = _make_starlette_app(instances_dir)
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get("/dav/instances/archived-inst/")
+    assert resp.status_code == 404
 
 
 def test_build_environ_basic():

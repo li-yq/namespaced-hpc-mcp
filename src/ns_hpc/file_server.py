@@ -17,13 +17,13 @@ import io
 import json
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from wsgidav.dav_error import DAVError, HTTP_METHOD_NOT_ALLOWED
-from wsgidav.dav_provider import DAVProvider
+from wsgidav.dav_provider import DAVCollection, DAVProvider
 from wsgidav.fs_dav_provider import FileResource as _FileResource
 from wsgidav.fs_dav_provider import FolderResource
 
@@ -198,12 +198,17 @@ class SandboxDavProvider(DAVProvider):
         """Resolve a provider-relative path to ``(host_path, readonly)``.
 
         Returns ``None`` when the path doesn't map to anything (404).
+
+        ``get_resource_inst`` handles virtual directories (root, instance listing,
+        mount listing) before this is called.
         """
         parts = path.strip("/").split("/")
-        if len(parts) < 2:
+        if not parts or parts[0] == "":
             return None
 
         if parts[0] == "instances":
+            if len(parts) < 2:
+                return None
             return self._resolve_instance_path(parts)
 
         return self._resolve_extra_path(parts)
@@ -268,6 +273,27 @@ class SandboxDavProvider(DAVProvider):
 
     def get_resource_inst(self, path: str, environ: dict):
         """Return a DAVNonCollection or DAVCollection for *path*."""
+        parts = path.strip("/").split("/")
+
+        # Virtual root directory listing at /dav/
+        if not parts or parts[0] == "":
+            return VirtualRootCollection(path, environ, self._cfg)
+
+        # Virtual instance listing at /dav/instances/
+        if parts[0] == "instances":
+            if len(parts) == 1:
+                return VirtualInstanceListCollection(
+                    path, environ, self._cfg, self._instances_dir, self._output_dir,
+                )
+            if len(parts) == 2:
+                inst = _load_instance(parts[1], self._cfg)
+                if inst is None or inst.is_archived():
+                    return None
+                return VirtualInstanceMountCollection(
+                    path, environ, self._instances_dir, self._output_dir,
+                )
+            # Fall through to real path resolution for deeper paths
+
         resolved = self._resolve(path, environ)
         if resolved is None:
             return None
@@ -303,11 +329,118 @@ class SandboxDavProvider(DAVProvider):
         if parts[0] == "instances" and method not in (
             "GET", "HEAD", "OPTIONS", "PROPFIND",
         ):
-            from ns_hpc.instance import Instance
-            inst = Instance.load(parts[1], self._cfg)
+            inst = _load_instance(parts[1], self._cfg)
             if inst is not None:
                 inst.audit("dav.write", method=method, path=path)
 
         if host_path.is_dir():
             return FolderResource(path, environ, str(host_path))
         return FileResource(path, environ, str(host_path))
+
+
+def _load_instance(instance_id: str, config: Config):
+    """Load an instance, returning None if not found. Avoids top-level import."""
+    from ns_hpc.instance import Instance
+    return Instance.load(instance_id, config)
+
+
+def _list_active_instances(config: Config) -> list:
+    """List active (non-archived) instances. Avoids top-level import."""
+    from ns_hpc.instance import Instance
+    return [i for i in Instance.list_instances(config) if not i.is_archived()]
+
+
+# -- Virtual DAV collections for directory listing ----------------------------
+
+
+class VirtualRootCollection(DAVCollection):
+    """Virtual root directory at ``/`` listing instances/ and configured extras."""
+
+    def __init__(self, path: str, environ: dict, config: Config) -> None:
+        super().__init__(path, environ)
+        self._cfg = config
+
+    def get_member_names(self) -> list[str]:
+        names = ["instances"]
+        names.extend(self._cfg.dav.extras)
+        return sorted(names)
+
+    def get_member(self, name: str):
+        from wsgidav import util
+        child_path = util.join_uri(self.path, name)
+        return self.provider.get_resource_inst(child_path, self.environ)
+
+    def get_displayname(self) -> str:
+        return "ns-hpc"
+
+    def get_creationdate(self):
+        return time.time()
+
+    def get_last_modified(self):
+        return time.time()
+
+
+class VirtualInstanceListCollection(DAVCollection):
+    """Virtual directory at ``/instances/`` listing all active (non-archived) instances."""
+
+    def __init__(
+        self, path: str, environ: dict, config: Config,
+        instances_dir: Path, output_dir: Path,
+    ) -> None:
+        super().__init__(path, environ)
+        self._cfg = config
+        self._instances_dir = instances_dir
+        self._output_dir = output_dir
+
+    def get_member_names(self) -> list[str]:
+        instances = _list_active_instances(self._cfg)
+        return sorted(i.id for i in instances)
+
+    def get_member(self, name: str):
+        from wsgidav import util
+        child_path = util.join_uri(self.path, name)
+        return self.provider.get_resource_inst(child_path, self.environ)
+
+    def get_displayname(self) -> str:
+        return "instances"
+
+    def get_creationdate(self):
+        return time.time()
+
+    def get_last_modified(self):
+        return time.time()
+
+
+class VirtualInstanceMountCollection(DAVCollection):
+    """Virtual directory at ``/instances/{id}/`` listing workspace/ and output/."""
+
+    def __init__(
+        self, path: str, environ: dict,
+        instances_dir: Path, output_dir: Path,
+    ) -> None:
+        super().__init__(path, environ)
+        self._instance_id = path.strip("/").split("/")[-1]
+        self._instances_dir = instances_dir
+        self._output_dir = output_dir
+
+    def get_member_names(self) -> list[str]:
+        names = []
+        if (self._instances_dir / self._instance_id / "workspace").is_dir():
+            names.append("workspace")
+        if (self._output_dir / self._instance_id).is_dir():
+            names.append("output")
+        return names
+
+    def get_member(self, name: str):
+        from wsgidav import util
+        child_path = util.join_uri(self.path, name)
+        return self.provider.get_resource_inst(child_path, self.environ)
+
+    def get_displayname(self) -> str:
+        return self._instance_id
+
+    def get_creationdate(self):
+        return time.time()
+
+    def get_last_modified(self):
+        return time.time()

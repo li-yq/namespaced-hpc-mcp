@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from wsgidav.dav_error import DAVError, HTTP_METHOD_NOT_ALLOWED
+from wsgidav.dav_error import DAVError, HTTP_FORBIDDEN, HTTP_METHOD_NOT_ALLOWED
 from wsgidav.dav_provider import DAVCollection, DAVProvider
 from wsgidav.fs_dav_provider import FileResource as _FileResource
 from wsgidav.fs_dav_provider import FolderResource
@@ -325,6 +325,11 @@ class SandboxDavProvider(DAVProvider):
         if not host_path.exists():
             return None
 
+        # Prevent DELETE, MOVE, COPY on mount roots (workspace, output, extra root)
+        is_mount_root = (parts[0] == "instances" and len(parts) == 3) or (
+            parts[0] in self._extras and len(parts) == 1
+        )
+
         # Audit writes to instance audit log
         if parts[0] == "instances" and method not in (
             "GET", "HEAD", "OPTIONS", "PROPFIND",
@@ -334,7 +339,8 @@ class SandboxDavProvider(DAVProvider):
                 inst.audit("dav.write", method=method, path=path)
 
         if host_path.is_dir():
-            res: Any = FolderResource(path, environ, str(host_path))
+            cls: Any = ProtectedFolderResource if is_mount_root else FolderResource
+            res = cls(path, environ, str(host_path))
         else:
             res = FileResource(path, environ, str(host_path))
         # _FileResource.__init__ overrides name with os.path.basename(_file_path);
@@ -354,6 +360,38 @@ def _list_active_instances(config: Config) -> list:
     """List active (non-archived) instances. Avoids top-level import."""
     from ns_hpc.instance import Instance
     return [i for i in Instance.list_instances(config) if not i.is_archived()]
+
+
+# -- Protected mount root resource --------------------------------------------
+
+
+class ProtectedFolderResource(FolderResource):
+    """A FolderResource that rejects DELETE, MOVE, and COPY.
+
+    Used for mount roots (workspace, output, extra roots) that should
+    not be deleted, renamed, or copied via WebDAV. Subpath operations
+    (e.g. deleting a file inside the workspace) are unaffected.
+    """
+
+    def handle_delete(self):
+        raise DAVError(
+            HTTP_FORBIDDEN, f"Cannot delete mount point: {self.path}"
+        )
+
+    def handle_move(self, dest_path):
+        raise DAVError(
+            HTTP_FORBIDDEN, f"Cannot rename mount point: {self.path}"
+        )
+
+    def handle_copy(self, dest_path, *, depth_infinity):
+        raise DAVError(
+            HTTP_FORBIDDEN, f"Cannot copy mount point: {self.path}"
+        )
+
+    def delete(self):
+        raise DAVError(
+            HTTP_FORBIDDEN, f"Cannot delete mount point: {self.path}"
+        )
 
 
 # -- Virtual DAV collections for directory listing ----------------------------
@@ -385,6 +423,15 @@ class VirtualRootCollection(DAVCollection):
     def get_last_modified(self):
         return time.time()
 
+    def handle_delete(self):
+        raise DAVError(HTTP_FORBIDDEN, "Cannot delete root directory")
+
+    def handle_move(self, dest_path):
+        raise DAVError(HTTP_FORBIDDEN, "Cannot rename root directory")
+
+    def handle_copy(self, dest_path, *, depth_infinity):
+        raise DAVError(HTTP_FORBIDDEN, "Cannot copy root directory")
+
 
 class VirtualInstanceListCollection(DAVCollection):
     """Virtual directory at ``/instances/`` listing all active (non-archived) instances."""
@@ -415,6 +462,15 @@ class VirtualInstanceListCollection(DAVCollection):
 
     def get_last_modified(self):
         return time.time()
+
+    def handle_delete(self):
+        raise DAVError(HTTP_FORBIDDEN, "Cannot delete instance list")
+
+    def handle_move(self, dest_path):
+        raise DAVError(HTTP_FORBIDDEN, "Cannot rename instance list")
+
+    def handle_copy(self, dest_path, *, depth_infinity):
+        raise DAVError(HTTP_FORBIDDEN, "Cannot copy instance list")
 
 
 class VirtualInstanceMountCollection(DAVCollection):
@@ -450,3 +506,18 @@ class VirtualInstanceMountCollection(DAVCollection):
 
     def get_last_modified(self):
         return time.time()
+
+    def handle_delete(self):
+        raise DAVError(
+            HTTP_FORBIDDEN,
+            "Cannot delete instance mount point; use the archive_instance tool instead",
+        )
+
+    def handle_move(self, dest_path):
+        raise DAVError(
+            HTTP_FORBIDDEN,
+            "Cannot rename instance mount point; instance ID is managed",
+        )
+
+    def handle_copy(self, dest_path, *, depth_infinity):
+        raise DAVError(HTTP_FORBIDDEN, "Cannot copy instance mount point")

@@ -14,6 +14,7 @@ from fastmcp import FastMCP, Context
 from fastmcp.exceptions import ToolError
 from fastmcp.resources import FileResource
 from fastmcp.tools import FunctionTool
+from fastmcp.tools.base import ToolResult
 from mcp.types import TextContent
 from pydantic import BaseModel, Field
 
@@ -226,6 +227,7 @@ async def _register_proxied_tools(server: FastMCP, config: Config) -> ProxyManag
                 name=tool_name,
                 description=remote_tool.description or "",
                 parameters=combined_schema,
+                output_schema=None,
                 annotations=remote_tool.annotations,
             )
             server.add_tool(ft)
@@ -303,7 +305,7 @@ class CreateInstanceInput(BaseModel):
     )
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def create_instance(input: CreateInstanceInput, ctx: Context) -> str:
     """Create a new sandbox instance with a persistent workspace directory."""
     context: ServerContext = ctx.lifespan_context
@@ -320,7 +322,7 @@ class ListInstancesInput(BaseModel):
     """Input for the list_instances tool."""
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations={"readOnlyHint": True}, output_schema=None)
 async def list_instances(input: ListInstancesInput, ctx: Context) -> str:
     """List all active (non-archived) sandbox instances."""
     context: ServerContext = ctx.lifespan_context
@@ -349,7 +351,7 @@ class ListArchivedInstancesInput(BaseModel):
     """Input for the list_archived_instances tool."""
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations={"readOnlyHint": True}, output_schema=None)
 async def list_archived_instances(input: ListArchivedInstancesInput, ctx: Context) -> str:
     """List all archived sandbox instances."""
     context: ServerContext = ctx.lifespan_context
@@ -380,7 +382,7 @@ class ArchiveInstanceInput(BaseModel):
     )
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def archive_instance(input: ArchiveInstanceInput, ctx: Context) -> str:
     """Archive a sandbox instance, disabling new job submissions."""
     context: ServerContext = ctx.lifespan_context
@@ -410,7 +412,7 @@ class UpdateInstanceInput(BaseModel):
     )
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def update_instance(input: UpdateInstanceInput, ctx: Context) -> str:
     """Update or get an instance's metadata (currently only description)."""
     context: ServerContext = ctx.lifespan_context
@@ -466,8 +468,8 @@ def _cap_timeout(timeout: int, config: Config) -> tuple[int, str]:
     return timeout, ""
 
 
-@mcp.tool()
-async def submit_job(input: SubmitJobInput, ctx: Context) -> dict:
+@mcp.tool(output_schema=None)
+async def submit_job(input: SubmitJobInput, ctx: Context) -> ToolResult:
     """Submit a command as an async (non-blocking) job."""
     config: Config = ctx.lifespan_context.config
 
@@ -512,7 +514,15 @@ async def submit_job(input: SubmitJobInput, ctx: Context) -> dict:
         d["timeout_capped"] = True
         existing = d.get("message", "")
         d["message"] = f"{cap_msg}. {existing}".strip() if existing else cap_msg
-    return d
+
+    summary = f"Job {d['job_id']}: {d['status']}"
+    if d.get("exit_code") is not None:
+        summary += f" (exit={d['exit_code']})"
+    if d.get("duration"):
+        summary += f" in {d['duration']}s"
+    if d.get("message"):
+        summary += f" — {d['message']}"
+    return ToolResult(content=summary, structured_content=d)
 
 
 class PollJobInput(BaseModel):
@@ -536,8 +546,8 @@ class PollJobInput(BaseModel):
     )
 
 
-@mcp.tool()
-async def poll_job(input: PollJobInput, ctx: Context) -> dict:
+@mcp.tool(output_schema=None)
+async def poll_job(input: PollJobInput, ctx: Context) -> ToolResult:
     """Poll a running job.  Optionally wait for completion."""
     config: Config = ctx.lifespan_context.config
 
@@ -572,15 +582,23 @@ async def poll_job(input: PollJobInput, ctx: Context) -> dict:
         d["timeout_capped"] = True
         existing = d.get("message", "")
         d["message"] = f"{cap_msg}. {existing}".strip() if existing else cap_msg
-    return d
+
+    summary = f"Job {d['job_id']}: {d['status']}"
+    if d.get("exit_code") is not None:
+        summary += f" (exit={d['exit_code']})"
+    if d.get("duration"):
+        summary += f" in {d['duration']}s"
+    if d.get("message"):
+        summary += f" — {d['message']}"
+    return ToolResult(content=summary, structured_content=d)
 
 
 class ListJobsInput(BaseModel):
     instance_id: str = Field(..., description="Instance ID")
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
-async def list_jobs(input: ListJobsInput, ctx: Context) -> list:
+@mcp.tool(annotations={"readOnlyHint": True}, output_schema=None)
+async def list_jobs(input: ListJobsInput, ctx: Context) -> ToolResult:
     """List all tracked jobs for an instance."""
     config: Config = ctx.lifespan_context.config
 
@@ -589,7 +607,11 @@ async def list_jobs(input: ListJobsInput, ctx: Context) -> list:
         raise ToolError(f"Instance '{input.instance_id}' not found")
 
     mgr = _get_manager(ctx, instance)
-    return mgr.list_jobs()
+    jobs = mgr.list_jobs()
+    if not jobs:
+        return ToolResult(content="No jobs found for this instance.")
+    summary = f"{len(jobs)} job(s) tracked"
+    return ToolResult(content=summary, structured_content={"jobs": jobs})
 
 
 class CancelJobInput(BaseModel):
@@ -603,8 +625,8 @@ class CancelJobInput(BaseModel):
     )
 
 
-@mcp.tool()
-async def cancel_job(input: CancelJobInput, ctx: Context) -> dict:
+@mcp.tool(output_schema=None)
+async def cancel_job(input: CancelJobInput, ctx: Context) -> ToolResult:
     """Cancel a running job and return its final status and output tail."""
     config: Config = ctx.lifespan_context.config
 
@@ -620,8 +642,15 @@ async def cancel_job(input: CancelJobInput, ctx: Context) -> dict:
     # Poll after cancel to capture final exit code and tail output
     result = await mgr.poll(input.job_id, tail=input.tail)
     if result is not None:
-        return result.to_dict()
-    return {"job_id": input.job_id, "cancelled": ok}
+        d = result.to_dict()
+        summary = f"Job {d['job_id']} cancelled: {d['status']}"
+        if d.get("exit_code") is not None:
+            summary += f" (exit={d['exit_code']})"
+        return ToolResult(content=summary, structured_content=d)
+    return ToolResult(
+        content=f"Job {input.job_id} cancellation requested (cancelled={'yes' if ok else 'no'}).",
+        structured_content={"job_id": input.job_id, "cancelled": ok},
+    )
 
 
 # ── Entry point ────────────────────────────────────────────────────────────

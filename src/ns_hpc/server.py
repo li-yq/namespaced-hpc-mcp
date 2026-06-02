@@ -595,11 +595,13 @@ async def poll_job(input: PollJobInput, ctx: Context) -> ToolResult:
 
 class ListJobsInput(BaseModel):
     instance_id: str = Field(..., description="Instance ID")
+    limit: int = Field(default=15, description="Max jobs to return", ge=1, le=500)
+    offset: int = Field(default=0, description="Jobs to skip", ge=0)
 
 
 @mcp.tool(annotations={"readOnlyHint": True}, output_schema=None)
 async def list_jobs(input: ListJobsInput, ctx: Context) -> ToolResult:
-    """List all tracked jobs for an instance."""
+    """List tracked jobs for an instance, newest first, with pagination."""
     config: Config = ctx.lifespan_context.config
 
     instance = Instance.load(input.instance_id, config)
@@ -607,11 +609,20 @@ async def list_jobs(input: ListJobsInput, ctx: Context) -> ToolResult:
         raise ToolError(f"Instance '{input.instance_id}' not found")
 
     mgr = _get_manager(ctx, instance)
-    jobs = mgr.list_jobs()
-    if not jobs:
+    all_jobs = mgr.list_jobs()
+    if not all_jobs:
         return ToolResult(content="No jobs found for this instance.")
-    summary = f"{len(jobs)} job(s) tracked"
-    return ToolResult(content=summary, structured_content={"jobs": jobs})
+
+    # Sort newest first (created_at may be missing for legacy entries)
+    all_jobs.sort(key=lambda j: j.get("created_at", ""), reverse=True)
+
+    total = len(all_jobs)
+    page = all_jobs[input.offset : input.offset + input.limit]
+    first = input.offset + 1
+    last = min(input.offset + len(page), total)
+
+    summary = f"Jobs {first}-{last} of {total} (limit={input.limit}, offset={input.offset})"
+    return ToolResult(content=summary, structured_content={"total": total, "jobs": page})
 
 
 class CancelJobInput(BaseModel):

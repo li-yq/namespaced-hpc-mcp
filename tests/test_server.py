@@ -1,5 +1,6 @@
 """Tests for the MCP server module."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -118,3 +119,26 @@ async def test_list_jobs_empty_returns_structured_empty_collection(tmp_path):
 
     assert _content_text(result) == "No jobs found for this instance."
     assert result.structured_content == {"total": 0, "jobs": []}
+
+
+@pytest.mark.asyncio
+async def test_list_jobs_text_includes_job_entries(tmp_path):
+    cfg = _config(str(tmp_path), "text")
+    inst = Instance.create("jobs-text", cfg)
+    jobs_dir = inst.base_dir / ".ns_hpc_jobs"
+    jobs_dir.mkdir()
+    (jobs_dir / "abc123.state").write_text(json.dumps({
+        "job_id": "abc123",
+        "status": "completed",
+        "created_at": "2026-06-12T00:00:00+00:00",
+        "command": "echo hello",
+        "mode": "local",
+    }))
+
+    result = await list_jobs(ListJobsInput(instance_id="jobs-text"), _ctx(cfg))
+
+    assert _content_text(result) == (
+        "Jobs 1-1 of 1 (limit=15, offset=0)\n"
+        "abc123: completed [local] created: 2026-06-12T00:00:00+00:00 — echo hello"
+    )
+    assert result.structured_content is None

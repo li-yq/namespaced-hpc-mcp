@@ -677,8 +677,17 @@ async def list_jobs(input: ListJobsInput, ctx: Context) -> ToolResult:
     first = input.offset + 1
     last = min(input.offset + len(page), total)
 
-    summary = f"Jobs {first}-{last} of {total} (limit={input.limit}, offset={input.offset})"
-    return _tool_result(config, summary, {"total": total, "jobs": page})
+    lines = [f"Jobs {first}-{last} of {total} (limit={input.limit}, offset={input.offset})"]
+    for job in page:
+        line = f"{job['job_id']}: {job['status']}"
+        if job.get("mode"):
+            line += f" [{job['mode']}]"
+        if job.get("created_at"):
+            line += f" created: {job['created_at']}"
+        if job.get("command"):
+            line += f" — {job['command']}"
+        lines.append(line)
+    return _tool_result(config, "\n".join(lines), {"total": total, "jobs": page})
 
 
 class CancelJobInput(BaseModel):

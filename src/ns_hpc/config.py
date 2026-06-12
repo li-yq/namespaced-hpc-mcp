@@ -2,6 +2,7 @@ import logging
 import os
 import typing
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel
 import tomli
@@ -75,11 +76,16 @@ class ResourceConfig(BaseModel):
     resource_patterns: list[str] = ["*.md"]
 
 
+class McpConfig(BaseModel):
+    result_type: Literal["structured", "text", "both"] = "text"
+
+
 class Config(BaseModel):
     namespace: Namespace
     jobs: JobsConfig
     resource: ResourceConfig = ResourceConfig()
     dav: DavConfig = DavConfig()
+    mcp: McpConfig = McpConfig()
     proxied_mcps: dict[str, ProxiedMCP]
 
     def resolve_instances_dir(self) -> Path:

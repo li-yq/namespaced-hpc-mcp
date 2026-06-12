@@ -112,6 +112,12 @@ context_dirs = ["context"]
 # File patterns matched when registering resources.
 # resource_patterns = ["*.md"]
 
+# ── MCP result formatting ────────────────────────────────────────────────────
+[mcp]
+# Result shape for ns-hpc's own tools: "text", "structured", or "both".
+# Proxied MCP tools keep their upstream result formatting.
+# result_type = "text"
+
 # ── WebDAV file access ───────────────────────────────────────────────────────
 [dav]
 # Enable WebDAV file access under /dav/ (only effective with HTTP transports).

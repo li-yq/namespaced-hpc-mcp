@@ -2,6 +2,9 @@ import os
 import tempfile
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from ns_hpc.config import Config, load_config
 
 
@@ -16,6 +19,7 @@ def test_default_config_values():
     assert cfg.proxied_mcps["filesystem"].command == "npx"
     assert cfg.resource.context_dirs == ["context"]
     assert cfg.resource.resource_patterns == ["*.md"]
+    assert cfg.mcp.result_type == "text"
     assert cfg.jobs.slurm.limit["cpus"].default == 1
     assert cfg.jobs.slurm.limit["cpus"].max == 8
     assert cfg.jobs.slurm.limit["memory"].default == 4096
@@ -66,6 +70,9 @@ env = {TOKEN = "sekret"}
 [resource]
 context_dirs = ["docs"]
 resource_patterns = ["*.rst", "*.txt"]
+
+[mcp]
+result_type = "both"
 """
     with tempfile.NamedTemporaryFile(mode="wb", suffix=".toml", delete=False) as f:
         f.write(toml_content.encode())
@@ -89,6 +96,7 @@ resource_patterns = ["*.rst", "*.txt"]
 
         assert cfg.resource.context_dirs == ["docs"]
         assert cfg.resource.resource_patterns == ["*.rst", "*.txt"]
+        assert cfg.mcp.result_type == "both"
         assert cfg.jobs.slurm.limit["cpus"].default == 2
         assert cfg.jobs.slurm.limit["cpus"].max == 16
         assert cfg.jobs.slurm.limit["memory"].default == 8192
@@ -106,3 +114,20 @@ def test_resolve_instances_dir():
     expected = Path.home() / ".local" / "share" / "ns-hpc" / "instances"
     assert resolved == expected.resolve()
     assert str(resolved).endswith("ns-hpc/instances")
+
+
+def test_invalid_mcp_result_type_rejected():
+    """mcp.result_type only accepts the supported result shapes."""
+    toml_content = """
+[mcp]
+result_type = "json"
+"""
+    with tempfile.NamedTemporaryFile(mode="wb", suffix=".toml", delete=False) as f:
+        f.write(toml_content.encode())
+        tmp = f.name
+
+    try:
+        with pytest.raises(ValidationError):
+            load_config(tmp)
+    finally:
+        os.unlink(tmp)

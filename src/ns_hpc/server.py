@@ -45,6 +45,15 @@ def _get_manager(ctx: Context, instance: Instance) -> JobManager:
     return mgr
 
 
+def _tool_result(config: Config, text: str, structured: dict[str, Any]) -> ToolResult:
+    """Format first-party tool results according to the MCP result config."""
+    if config.mcp.result_type == "structured":
+        return ToolResult(content=[], structured_content=structured)
+    if config.mcp.result_type == "both":
+        return ToolResult(content=text, structured_content=structured)
+    return ToolResult(content=text)
+
+
 def _register_context_resources(server: FastMCP, config: Config, config_path: str | None = None) -> None:
     """Scan context directories and register matching files as static resources.
 
@@ -306,7 +315,7 @@ class CreateInstanceInput(BaseModel):
 
 
 @mcp.tool(output_schema=None)
-async def create_instance(input: CreateInstanceInput, ctx: Context) -> str:
+async def create_instance(input: CreateInstanceInput, ctx: Context) -> ToolResult:
     """Create a new sandbox instance with a persistent workspace directory."""
     context: ServerContext = ctx.lifespan_context
 
@@ -315,7 +324,15 @@ async def create_instance(input: CreateInstanceInput, ctx: Context) -> str:
     except FileExistsError:
         raise ToolError(f"Instance '{input.instance_id}' already exists")
 
-    return f"Instance '{input.instance_id}' created."
+    return _tool_result(
+        context.config,
+        f"Instance '{input.instance_id}' created.",
+        {
+            "instance_id": instance.id,
+            "created": True,
+            "description": input.description,
+        },
+    )
 
 
 class ListInstancesInput(BaseModel):
@@ -323,15 +340,20 @@ class ListInstancesInput(BaseModel):
 
 
 @mcp.tool(annotations={"readOnlyHint": True}, output_schema=None)
-async def list_instances(input: ListInstancesInput, ctx: Context) -> str:
+async def list_instances(input: ListInstancesInput, ctx: Context) -> ToolResult:
     """List all active (non-archived) sandbox instances."""
     context: ServerContext = ctx.lifespan_context
 
     instances = Instance.list_instances(context.config)
     if not instances:
-        return "No instances found."
+        return _tool_result(
+            context.config,
+            "No instances found.",
+            {"total": 0, "instances": []},
+        )
 
     lines = []
+    structured_instances = []
     for inst in instances:
         try:
             meta = json.loads(inst.metadata_path.read_text())
@@ -341,10 +363,24 @@ async def list_instances(input: ListInstancesInput, ctx: Context) -> str:
             if desc:
                 label += f"  [{desc[:50]}]"
             lines.append(label)
+            structured_instances.append({
+                "instance_id": inst.id,
+                "created_at": meta.get("created_at"),
+                "description": desc,
+            })
         except Exception:
             lines.append(f"{inst.id:20s}  created: unknown")
+            structured_instances.append({
+                "instance_id": inst.id,
+                "created_at": None,
+                "description": "",
+            })
 
-    return "\n".join(lines)
+    return _tool_result(
+        context.config,
+        "\n".join(lines),
+        {"total": len(structured_instances), "instances": structured_instances},
+    )
 
 
 class ListArchivedInstancesInput(BaseModel):
@@ -352,13 +388,17 @@ class ListArchivedInstancesInput(BaseModel):
 
 
 @mcp.tool(annotations={"readOnlyHint": True}, output_schema=None)
-async def list_archived_instances(input: ListArchivedInstancesInput, ctx: Context) -> str:
+async def list_archived_instances(input: ListArchivedInstancesInput, ctx: Context) -> ToolResult:
     """List all archived sandbox instances."""
     context: ServerContext = ctx.lifespan_context
 
     archived = Instance.list_archived_instances(context.config)
     if not archived:
-        return "No archived instances found."
+        return _tool_result(
+            context.config,
+            "No archived instances found.",
+            {"total": 0, "instances": []},
+        )
 
     lines = []
     for entry in archived:
@@ -371,7 +411,11 @@ async def list_archived_instances(input: ListArchivedInstancesInput, ctx: Contex
             label += f"  [{entry['description'][:50]}]"
         lines.append(label)
 
-    return "\n".join(lines)
+    return _tool_result(
+        context.config,
+        "\n".join(lines),
+        {"total": len(archived), "instances": archived},
+    )
 
 
 class ArchiveInstanceInput(BaseModel):
@@ -383,7 +427,7 @@ class ArchiveInstanceInput(BaseModel):
 
 
 @mcp.tool(output_schema=None)
-async def archive_instance(input: ArchiveInstanceInput, ctx: Context) -> str:
+async def archive_instance(input: ArchiveInstanceInput, ctx: Context) -> ToolResult:
     """Archive a sandbox instance, disabling new job submissions."""
     context: ServerContext = ctx.lifespan_context
 
@@ -397,7 +441,11 @@ async def archive_instance(input: ArchiveInstanceInput, ctx: Context) -> str:
         instance.archive(context.config)
     except RuntimeError as e:
         raise ToolError(str(e))
-    return f"Instance '{input.instance_id}' archived."
+    return _tool_result(
+        context.config,
+        f"Instance '{input.instance_id}' archived.",
+        {"instance_id": input.instance_id, "archived": True},
+    )
 
 
 class UpdateInstanceInput(BaseModel):
@@ -413,7 +461,7 @@ class UpdateInstanceInput(BaseModel):
 
 
 @mcp.tool(output_schema=None)
-async def update_instance(input: UpdateInstanceInput, ctx: Context) -> str:
+async def update_instance(input: UpdateInstanceInput, ctx: Context) -> ToolResult:
     """Update or get an instance's metadata (currently only description)."""
     context: ServerContext = ctx.lifespan_context
 
@@ -425,7 +473,11 @@ async def update_instance(input: UpdateInstanceInput, ctx: Context) -> str:
         instance.set_description(input.description)
 
     desc = instance.get_description()
-    return f"Instance '{input.instance_id}': description='{desc}'"
+    return _tool_result(
+        context.config,
+        f"Instance '{input.instance_id}': description='{desc}'",
+        {"instance_id": input.instance_id, "description": desc},
+    )
 
 
 # ── Job execution ─────────────────────────────────────────────────────────
@@ -522,7 +574,7 @@ async def submit_job(input: SubmitJobInput, ctx: Context) -> ToolResult:
         summary += f" in {d['duration']}s"
     if d.get("message"):
         summary += f" — {d['message']}"
-    return ToolResult(content=summary, structured_content=d)
+    return _tool_result(config, summary, d)
 
 
 class PollJobInput(BaseModel):
@@ -590,7 +642,7 @@ async def poll_job(input: PollJobInput, ctx: Context) -> ToolResult:
         summary += f" in {d['duration']}s"
     if d.get("message"):
         summary += f" — {d['message']}"
-    return ToolResult(content=summary, structured_content=d)
+    return _tool_result(config, summary, d)
 
 
 class ListJobsInput(BaseModel):
@@ -611,7 +663,11 @@ async def list_jobs(input: ListJobsInput, ctx: Context) -> ToolResult:
     mgr = _get_manager(ctx, instance)
     all_jobs = mgr.list_jobs()
     if not all_jobs:
-        return ToolResult(content="No jobs found for this instance.")
+        return _tool_result(
+            config,
+            "No jobs found for this instance.",
+            {"total": 0, "jobs": []},
+        )
 
     # Sort newest first (created_at may be missing for legacy entries)
     all_jobs.sort(key=lambda j: j.get("created_at", ""), reverse=True)
@@ -622,7 +678,7 @@ async def list_jobs(input: ListJobsInput, ctx: Context) -> ToolResult:
     last = min(input.offset + len(page), total)
 
     summary = f"Jobs {first}-{last} of {total} (limit={input.limit}, offset={input.offset})"
-    return ToolResult(content=summary, structured_content={"total": total, "jobs": page})
+    return _tool_result(config, summary, {"total": total, "jobs": page})
 
 
 class CancelJobInput(BaseModel):
@@ -657,10 +713,11 @@ async def cancel_job(input: CancelJobInput, ctx: Context) -> ToolResult:
         summary = f"Job {d['job_id']} cancelled: {d['status']}"
         if d.get("exit_code") is not None:
             summary += f" (exit={d['exit_code']})"
-        return ToolResult(content=summary, structured_content=d)
-    return ToolResult(
-        content=f"Job {input.job_id} cancellation requested (cancelled={'yes' if ok else 'no'}).",
-        structured_content={"job_id": input.job_id, "cancelled": ok},
+        return _tool_result(config, summary, d)
+    return _tool_result(
+        config,
+        f"Job {input.job_id} cancellation requested (cancelled={'yes' if ok else 'no'}).",
+        {"job_id": input.job_id, "cancelled": ok},
     )
 
 

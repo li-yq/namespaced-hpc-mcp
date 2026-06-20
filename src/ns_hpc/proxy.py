@@ -5,12 +5,18 @@ instance and connected via stdio.  Tools are discovered at server startup
 (outside bwrap) so their schemas are known, then lazy-wrapped: when the user
 calls a proxied tool with an ``instance_id``, the proxy starts the MCP server
 inside that instance's sandbox and forwards the call.
+
+Proxied MCP connections can be configured with an ``idle_timeout`` (seconds).
+After no tool calls for the timeout duration, the connection is automatically
+closed.  When set to 0 (the default), connections live forever.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import time
 from typing import Any
 
 from fastmcp.client import Client
@@ -56,22 +62,45 @@ async def discover_tools(cfg: ProxiedMCP, config: Config) -> list[Tool]:
 
 
 class ProxiedMCPClient:
-    """One connection to a proxied MCP server running inside an instance."""
+    """One connection to a proxied MCP server running inside an instance.
 
-    def __init__(self, proxy_name: str, instance_id: str, cfg: ProxiedMCP, config: Config) -> None:
+    When configured with an ``idle_timeout`` > 0, an internal monitor task
+    tracks the time since the last tool call completed.  If no calls occur
+    within the timeout window, the connection is automatically closed and the
+    client is removed from the ProxyManager.
+    """
+
+    def __init__(
+        self,
+        proxy_name: str,
+        instance_id: str,
+        cfg: ProxiedMCP,
+        config: Config,
+        on_idle_close: callable | None = None,
+    ) -> None:
         self.proxy_name = proxy_name
         self.instance_id = instance_id
         self.cfg = cfg
         self.config = config
         self._client: Client | None = None
+        self._last_used: float = 0.0       # monotonic time of last call completion
+        self._active_calls: int = 0         # concurrent calls in flight
+        self._idle_task: asyncio.Task | None = None
+        self._on_idle_close = on_idle_close
+        self._closed: bool = False
 
     @property
     def is_connected(self) -> bool:
         """True once ensure_connected() has succeeded at least once."""
-        return self._client is not None
+        return self._client is not None and not self._closed
 
     async def ensure_connected(self) -> Client:
         """Start the process inside bwrap and connect if not already connected."""
+        if self._closed:
+            raise RuntimeError(
+                f"ProxiedMCPClient {self.proxy_name!r}/{self.instance_id!r} "
+                f"was closed due to idle timeout; obtain a new client"
+            )
         if self._client is not None:
             return self._client
 
@@ -106,22 +135,72 @@ class ProxiedMCPClient:
         client = Client(transport)
         await client.__aenter__()
         self._client = client
+        self._last_used = time.monotonic()
         return client
 
-    async def list_tools(self) -> list[Tool]:
-        client = await self.ensure_connected()
-        return await client.list_tools()
+    def _start_idle_monitor(self) -> None:
+        """Start a background task that closes the connection after idle_timeout."""
+        if self._idle_task is not None:
+            return
+        if self.cfg.idle_timeout <= 0:
+            return
+        self._idle_task = asyncio.ensure_future(self._idle_loop())
+
+    async def _idle_loop(self) -> None:
+        """Background coroutine: check idle state periodically and close if expired."""
+        timeout = self.cfg.idle_timeout
+        try:
+            while not self._closed:
+                await asyncio.sleep(timeout)
+                # If active calls are in flight, don't close — wait for the next
+                # check cycle.  The fact that a call is running counts as activity.
+                now = time.monotonic()
+                idle_duration = now - self._last_used
+                if self._active_calls > 0:
+                    # Calls are in flight; reset the idle timer implicitly
+                    # (the call completion handler will refresh _last_used)
+                    continue
+                if idle_duration >= timeout:
+                    logger.info(
+                        "proxy %r/%r idle for %.1fs (timeout=%.0fs), closing",
+                        self.proxy_name, self.instance_id,
+                        idle_duration, timeout,
+                    )
+                    await self.close()
+                    break
+        except asyncio.CancelledError:
+            pass
 
     async def call_tool(
         self, name: str, arguments: dict[str, Any]
     ) -> list[TextContent]:
         client = await self.ensure_connected()
-        return await client.call_tool(name, arguments)
+        self._active_calls += 1
+        try:
+            result = await client.call_tool(name, arguments)
+        finally:
+            self._active_calls -= 1
+            self._last_used = time.monotonic()
+        return result
+
+    async def list_tools(self) -> list[Tool]:
+        client = await self.ensure_connected()
+        return await client.list_tools()
 
     async def close(self) -> None:
+        """Close the connection and cancel the idle monitor."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._idle_task is not None:
+            self._idle_task.cancel()
+            self._idle_task = None
         if self._client is not None:
             await self._client.__aexit__(None, None, None)
             self._client = None
+        # Notify the manager so it can remove this client from its bookkeeping
+        if self._on_idle_close is not None:
+            self._on_idle_close(self.proxy_name, self.instance_id)
 
 
 class ProxyManager:
@@ -133,6 +212,14 @@ class ProxyManager:
     def __init__(self) -> None:
         self._clients: dict[str, dict[str, ProxiedMCPClient]] = {}
 
+    def _remove_client(self, proxy_name: str, instance_id: str) -> None:
+        """Remove a closed client from internal bookkeeping."""
+        by_instance = self._clients.get(proxy_name)
+        if by_instance is not None:
+            by_instance.pop(instance_id, None)
+            if not by_instance:
+                self._clients.pop(proxy_name, None)
+
     def get_or_start(
         self,
         proxy_name: str,
@@ -140,12 +227,20 @@ class ProxyManager:
         cfg: ProxiedMCP,
         config: Config,
     ) -> ProxiedMCPClient:
-        """Return an existing client for *proxy_name*/*instance_id* or create one."""
+        """Return an existing client for *proxy_name*/*instance_id* or create one.
+
+        If a previously-closed (idle-timed-out) client exists for this
+        proxy_name/instance_id pair, a new one is created.
+        """
         by_instance = self._clients.setdefault(proxy_name, {})
         client = by_instance.get(instance_id)
-        if client is None:
-            client = ProxiedMCPClient(proxy_name, instance_id, cfg, config)
+        if client is None or client._closed:
+            client = ProxiedMCPClient(
+                proxy_name, instance_id, cfg, config,
+                on_idle_close=self._remove_client,
+            )
             by_instance[instance_id] = client
+            client._start_idle_monitor()
         return client
 
     async def stop_all(self, instance_id: str) -> None:

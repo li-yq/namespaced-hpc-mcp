@@ -102,6 +102,8 @@ memory = { default = 4096, max = 32768 }
 [proxied_mcps.filesystem]
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/"]
+# idle_timeout = 300                # idle seconds before auto-close (0 = live forever)
+
 
 # ── Context resources ────────────────────────────────────────────────────────
 [resource]

@@ -17,6 +17,7 @@ class ProxiedMCP(BaseModel):
     env: dict[str, str] | None = None
     include: list[str] = []
     exclude: list[str] = []
+    idle_timeout: float = 0.0  # seconds, 0 = no timeout (live forever)
 
 
 class DavExtraMount(BaseModel):

@@ -131,3 +131,38 @@ result_type = "json"
             load_config(tmp)
     finally:
         os.unlink(tmp)
+
+
+def test_host_commands_from_toml():
+    """host_commands are parsed from TOML with description and timeout fields."""
+    toml_content = '''
+[host_commands.df]
+command = "df -h"
+description = "Show disk usage"
+timeout = 10
+
+[host_commands.quota]
+command = "lfs quota /data"
+'''
+    with tempfile.NamedTemporaryFile(mode="wb", suffix=".toml", delete=False) as f:
+        f.write(toml_content.encode())
+        tmp = f.name
+
+    try:
+        cfg = load_config(tmp)
+        assert len(cfg.host_commands) == 2
+        assert cfg.host_commands["df"].command == "df -h"
+        assert cfg.host_commands["df"].description == "Show disk usage"
+        assert cfg.host_commands["df"].timeout == 10
+        assert cfg.host_commands["quota"].command == "lfs quota /data"
+        assert cfg.host_commands["quota"].description == ""
+        assert cfg.host_commands["quota"].timeout == 30.0  # default
+    finally:
+        os.unlink(tmp)
+
+
+def test_host_commands_default_empty():
+    """Default config has no host commands."""
+    cfg = load_config("/nonexistent/config.toml")
+    assert cfg.host_commands == {}
+

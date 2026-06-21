@@ -20,6 +20,14 @@ class ProxiedMCP(BaseModel):
     idle_timeout: float = 0.0  # seconds, 0 = no timeout (live forever)
 
 
+
+class HostCommand(BaseModel):
+    """Pre-configured command that runs on the host (outside any sandbox)."""
+    command: str
+    description: str = ""
+    timeout: float = 30.0
+
+
 class DavExtraMount(BaseModel):
     """Extra WebDAV mount under /dav/{name}/."""
     path: str
@@ -88,6 +96,7 @@ class Config(BaseModel):
     dav: DavConfig = DavConfig()
     mcp: McpConfig = McpConfig()
     proxied_mcps: dict[str, ProxiedMCP]
+    host_commands: dict[str, HostCommand] = {}
 
     def resolve_instances_dir(self) -> Path:
         resolved = os.path.expandvars(os.path.expanduser(self.namespace.instances_dir))

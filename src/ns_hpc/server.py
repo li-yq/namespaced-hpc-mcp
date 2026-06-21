@@ -1,9 +1,11 @@
 """MCP server for ns-hpc — sandboxed command execution and instance management."""
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import json
 import os
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,7 +21,7 @@ from mcp.types import TextContent
 from pydantic import BaseModel, Field
 
 from ns_hpc import _enable_debug_logging
-from ns_hpc.config import Config, ProxiedMCP, load_config
+from ns_hpc.config import Config, HostCommand, ProxiedMCP, load_config
 from ns_hpc.instance import Instance
 from ns_hpc.job_manager import JobManager, JobStatus
 from ns_hpc.proxy import ProxyManager, discover_tools
@@ -730,7 +732,96 @@ async def cancel_job(input: CancelJobInput, ctx: Context) -> ToolResult:
     )
 
 
+
+# ── Host command execution ─────────────────────────────────────────────────
+
+
+class HostExecInput(BaseModel):
+    command: str | None = Field(
+        default=None,
+        description="Config key of the host command to run. Omit to list available commands.",
+    )
+
+
+async def _run_host_cmd(cfg: HostCommand) -> dict[str, Any]:
+    """Run a configured host command and return stdout/stderr/exit/elapsed."""
+    start = time.monotonic()
+    proc = await asyncio.create_subprocess_exec(
+        "sh", "-c", cfg.command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(), timeout=cfg.timeout,
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise ToolError(
+            f"Host command timed out after {cfg.timeout}s: {cfg.command!r}"
+        )
+    elapsed = round(time.monotonic() - start, 2)
+    return {
+        "stdout": stdout_bytes.decode(errors="replace").strip(),
+        "stderr": stderr_bytes.decode(errors="replace").strip(),
+        "exit_code": proc.returncode,
+        "elapsed": elapsed,
+    }
+
+
+@mcp.tool(output_schema=None)
+async def host_exec(input: HostExecInput, ctx: Context) -> ToolResult:
+    """Run a pre-configured host command or list available commands.
+
+    With no argument, returns the list of configured host commands and
+    their descriptions.  With a ``command`` key, runs the matching
+    host command outside any sandbox (directly on the host).
+    """
+    config: Config = ctx.lifespan_context.config
+    cmds = config.host_commands
+
+    if input.command is None:
+        if not cmds:
+            return _tool_result(
+                config,
+                "No host commands configured.",
+                {"commands": {}},
+            )
+        lines = ["Available host commands:"]
+        for key, cfg in sorted(cmds.items()):
+            desc = f" — {cfg.description}" if cfg.description else ""
+            lines.append(f"  {key}{desc}")
+        return _tool_result(
+            config,
+            "\n".join(lines),
+            {
+                "commands": {
+                    key: {"description": cfg.description, "command": cfg.command}
+                    for key, cfg in cmds.items()
+                },
+            },
+        )
+
+    cfg = cmds.get(input.command)
+    if cfg is None:
+        available = ", ".join(sorted(cmds.keys())) if cmds else "(none configured)"
+        raise ToolError(
+            f"Unknown host command {input.command!r}. "
+            f"Available: {available}"
+        )
+
+    result = await _run_host_cmd(cfg)
+    summary = f"host:{input.command} exit={result['exit_code']} in {result['elapsed']}s"
+    if result["stdout"]:
+        summary += f"\n{result['stdout']}"
+    if result["stderr"]:
+        summary += f"\n[stderr] {result['stderr']}"
+    return _tool_result(config, summary, result)
+
+
 # ── Entry point ────────────────────────────────────────────────────────────
+
 
 
 

@@ -106,6 +106,21 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/"]
 
 
 # ── Context resources ────────────────────────────────────────────────────────
+# ── Host commands (run outside sandbox) ────────────────────────────────────────
+# Each entry defines a command that runs directly on the host via the
+# ``host_exec`` MCP tool.  Useful for infrastructure checks (disk usage,
+# cluster status, etc.) that must run outside any sandbox.
+#
+# [host_commands.df]
+# command = "df -h"
+# description = "Show filesystem disk space usage"
+# timeout = 10
+#
+# [host_commands.lfs-quota]
+# command = "lfs quota -h /data"
+# description = "Check Lustre quota for /data"
+# timeout = 30
+
 [resource]
 # Directories scanned for resource files (relative paths resolve from the
 # config file's parent directory; ~ is expanded).

@@ -192,12 +192,24 @@ class ProxiedMCPClient:
         if self._closed:
             return
         self._closed = True
+        # Avoid self-cancellation: when close() is called from _idle_loop
+        # the _idle_task *is* the current task.  Cancelling ourselves would
+        # prevent the subprocess cleanup and _on_idle_close from running.
+        current = asyncio.current_task()
         if self._idle_task is not None:
-            self._idle_task.cancel()
+            if self._idle_task is not current:
+                self._idle_task.cancel()
             self._idle_task = None
         if self._client is not None:
-            await self._client.__aexit__(None, None, None)
+            # Use Client.close() to properly terminate the subprocess
+            # (__aexit__ alone leaves the subprocess alive with keep_alive=True).
+            # Fall back to __aexit__ when _client is a non-Client mock.
+            client = self._client
             self._client = None
+            if hasattr(client, 'close'):
+                await client.close()
+            elif hasattr(client, '__aexit__'):
+                await client.__aexit__(None, None, None)
         # Notify the manager so it can remove this client from its bookkeeping
         if self._on_idle_close is not None:
             self._on_idle_close(self.proxy_name, self.instance_id)

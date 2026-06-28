@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -225,6 +226,53 @@ async def test_cancel_nonexistent(tmp_path, monkeypatch):
     inst = _instance(cfg)
     mgr = JobManager(inst, cfg)
     assert not await mgr.cancel("nonexistent")
+
+
+@pytest.mark.asyncio
+async def test_poll_slurm_out_of_memory_is_terminal(tmp_path, monkeypatch):
+    """Slurm OUT_OF_MEMORY is a terminal failed state, even when sacct has no exit code."""
+    cfg = _config(str(tmp_path), monkeypatch)
+    inst = _instance(cfg)
+    mgr = JobManager(inst, cfg)
+
+    stdout_path = inst.output_path / "oom.out"
+    stderr_path = inst.output_path / "oom.err"
+    status_path = inst.output_path / "oom.status"
+    stdout_path.write_text("")
+    stderr_path.write_text("slurmstepd: error: Detected 1 oom-kill event\n")
+    status_path.write_text(json.dumps({"exit-code": 137}) + "\n")
+
+    job_id = "slurm-oom"
+    entry = {
+        "command": "allocate-too-much",
+        "mode": "slurm",
+        "status": "running",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "status_path": str(status_path),
+        "slurm_job_id": 33882901,
+    }
+    mgr._jobs[job_id] = entry
+
+    calls = 0
+
+    async def fake_slurm_job_state(slurm_job_id: int) -> tuple[str, int | None]:
+        nonlocal calls
+        calls += 1
+        assert slurm_job_id == 33882901
+        return "OUT_OF_MEMORY", None
+
+    monkeypatch.setattr(mgr, "_slurm_job_state", fake_slurm_job_state)
+
+    result = await mgr.poll(job_id, timeout=30, tail=5)
+
+    assert calls == 1
+    assert result.status == JobStatus.FAILED
+    assert result.exit_code == 137
+    assert "oom-kill" in result.stderr_tail
+    assert mgr._jobs[job_id]["status"] == "failed"
+    assert mgr._jobs[job_id]["exit_code"] == 137
 
 
 @pytest.mark.asyncio

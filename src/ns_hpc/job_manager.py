@@ -28,6 +28,21 @@ from ns_hpc.config import Config
 from ns_hpc.instance import Instance
 
 
+_SLURM_FAILED_STATES = frozenset({
+    "BOOT_FAIL",
+    "DEADLINE",
+    "FAILED",
+    "LAUNCH_FAILED",
+    "NODE_FAIL",
+    "OUT_OF_MEMORY",
+    "PREEMPTED",
+    "RECONFIG_FAIL",
+    "REVOKED",
+    "SPECIAL_EXIT",
+    "TIMEOUT",
+})
+
+
 # Slurm 25.11+ changed sacct --json state/exit_code from flat strings to nested
 # dicts.  These helpers normalise both formats.
 def _parse_slurm_state(job: dict) -> str:
@@ -646,7 +661,7 @@ class JobManager:
             duration=self._duration_since_created(entry),
         )
 
-    async def _slurm_job_state(self, slurm_job_id: int) -> tuple[str, int | None]:
+    async def _slurm_job_state(self, slurm_job_id: int) -> tuple[str | None, int | None]:
         """Query sacct and return (state, exit_code) for a Slurm job."""
         try:
             logger.debug("running: sacct -j %s --json -X", slurm_job_id)
@@ -727,7 +742,7 @@ class JobManager:
             if state in ("COMPLETED",):
                 # Prefer exit code from status file (more precise than sacct)
                 if ec is None and "status_path" in entry:
-                    _, st = self._read_status_file(Path(entry["status_path"]))
+                    _, st, _ = self._read_status_file(Path(entry["status_path"]))
                     ec = st
                 entry["status"] = "completed"
                 entry["exit_code"] = ec if ec is not None else 0
@@ -744,10 +759,10 @@ class JobManager:
                     duration=entry["duration"],
                 )
 
-            if state in ("FAILED", "TIMEOUT", "NODE_FAIL"):
+            if state in _SLURM_FAILED_STATES:
                 # Prefer exit code from status file (more precise than sacct)
                 if ec is None and "status_path" in entry:
-                    _, st = self._read_status_file(Path(entry["status_path"]))
+                    _, st, _ = self._read_status_file(Path(entry["status_path"]))
                     ec = st
                 entry["status"] = "failed"
                 entry["exit_code"] = ec if ec is not None else -1
@@ -770,7 +785,7 @@ class JobManager:
             if state == "CANCELLED":
                 # Externally cancelled (e.g. scancel, preemption)
                 if ec is None and "status_path" in entry:
-                    _, st = self._read_status_file(Path(entry["status_path"]))
+                    _, st, _ = self._read_status_file(Path(entry["status_path"]))
                     ec = st
                 entry["status"] = "cancelled"
                 entry["exit_code"] = ec if ec is not None else -1

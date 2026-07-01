@@ -187,8 +187,12 @@ class SandboxDavProvider(DAVProvider):
         self._instances_dir = config.resolve_instances_dir()
         self._output_dir = self._instances_dir / "output"
         self._extras = config.dav.extras
+        # wsgidav.fs_dav_provider resources expect these FilesystemProvider
+        # attributes even though this provider routes virtual mount points.
+        self.fs_opts = {"follow_symlinks": False}
+        self.shadow_map = {}
         # wsgidav.fs_dav_provider checks self.provider.readonly; we handle
-        # per-mount readonly in get_resource_inst, so mark provider as rw
+        # per-mount readonly in get_resource_inst, so mark provider as rw.
         self.readonly = False
 
     def __repr__(self) -> str:

@@ -202,6 +202,15 @@ def test_get_resource_inst_directory(tmp_path):
     from wsgidav.fs_dav_provider import FolderResource
     assert isinstance(resource, FolderResource)
 
+
+def test_provider_has_wsgidav_filesystem_compat_options(tmp_path):
+    instances_dir = tmp_path / "instances"
+    (instances_dir / "output").mkdir(parents=True)
+    prov = _make_provider(_make_config(instances_dir))
+    assert prov.fs_opts["follow_symlinks"] is False
+    assert prov.shadow_map == {}
+
+
 def test_get_resource_inst_not_found(tmp_path):
     instances_dir = tmp_path / "instances"
     _setup_instance(instances_dir)
@@ -318,6 +327,16 @@ def test_dav_mkcol_creates_directory(tmp_path):
     code, _, _ = _wsgi_call(app, "MKCOL", "/instances/my-inst/workspace/subdir")
     assert code in (200, 201)
     assert (instances_dir / "my-inst" / "workspace" / "subdir").is_dir()
+
+
+def test_dav_get_directory_browser_listing(tmp_path):
+    instances_dir = tmp_path / "instances"
+    _setup_instance(instances_dir)
+    (instances_dir / "my-inst" / "workspace" / "hello.txt").write_text("hello world")
+    app = _make_dav_app(instances_dir)
+    code, _, body = _wsgi_call(app, "GET", "/instances/my-inst/workspace/")
+    assert code == 200
+    assert "hello.txt" in body.decode()
 
 
 # -- WebDAV end-to-end via Starlette Mount + WsgiToAsgi (simulates production) --

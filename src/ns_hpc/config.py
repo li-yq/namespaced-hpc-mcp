@@ -4,7 +4,7 @@ import typing
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import tomli
 
 
@@ -46,6 +46,8 @@ class DavConfig(BaseModel):
         /dav/{extra_name}/
     """
     enabled: bool = False
+    spool_min_free_bytes: int = Field(default=1024**3, ge=0)
+    max_inflight_requests: int = Field(default=20, ge=1)
     extras: dict[str, DavExtraMount] = {}
 
 

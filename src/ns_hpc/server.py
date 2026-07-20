@@ -269,7 +269,35 @@ def _mount_dav(server: FastMCP, config: Config) -> None:
         "mount_path": "/dav",
     })
     dav_app = WsgiDAVApp(dav_cfg)
-    asgi_app = PooledWSGIApp(dav_app, max_workers=10)
+    spool_dir = config.resolve_instances_dir() / ".dav-spool"
+    if spool_dir.is_symlink():
+        raise RuntimeError(
+            f"WebDAV spool directory must not be a symbolic link: {spool_dir}"
+        )
+    spool_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        spool_fd = os.open(
+            spool_dir,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"Cannot securely open WebDAV spool directory: {spool_dir}") from exc
+    try:
+        spool_stat = os.fstat(spool_fd)
+        if spool_stat.st_uid != os.geteuid():
+            raise RuntimeError(
+                f"WebDAV spool directory is not owned by the service user: {spool_dir}"
+            )
+        os.fchmod(spool_fd, 0o700)
+    finally:
+        os.close(spool_fd)
+    asgi_app = PooledWSGIApp(
+        dav_app,
+        max_workers=10,
+        max_inflight_requests=config.dav.max_inflight_requests,
+        spool_dir=spool_dir,
+        min_spool_free_bytes=config.dav.spool_min_free_bytes,
+    )
     server._additional_http_routes.append(Mount("/dav", app=asgi_app, name="dav"))
     logger = logging.getLogger("ns-hpc")
     logger.info("WebDAV mounted at /dav/")

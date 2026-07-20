@@ -143,6 +143,14 @@ context_dirs = ["context"]
 # excluded automatically.
 # enabled = false
 
+# Minimum free space retained on the WebDAV spool filesystem. Uploads return
+# HTTP 507 before temporary plus destination copies would cross this reserve.
+# spool_min_free_bytes = 1073741824
+
+# Maximum active plus queued WebDAV requests. Additional requests receive 503
+# instead of accumulating in the thread pool's unbounded internal queue.
+# max_inflight_requests = 20
+
 # Extra static mounts served at /dav/{name}/.  Set ro=false for read-write.
 # [dav.extras.external-data]
 # path = "/mnt/external-data"

@@ -414,7 +414,12 @@ def _make_starlette_app(instances_dir, **dav_kw):
         "mount_path": "/dav",
     })
     dav_app = WsgiDAVApp(dav_cfg)
-    asgi_app = PooledWSGIApp(dav_app, max_workers=10)
+    asgi_app = PooledWSGIApp(
+        dav_app,
+        max_workers=10,
+        spool_dir=instances_dir.parent,
+        min_spool_free_bytes=0,
+    )
     routes = [Mount("/dav", app=asgi_app, name="dav")]
     return Starlette(routes=routes)
 
@@ -908,7 +913,12 @@ async def test_pooled_wsgi_app_get_response():
         "mount_path": None,
     })
     wsgi_app = WsgiDAVApp(dav_cfg)
-    asgi_app = PooledWSGIApp(wsgi_app, max_workers=2)
+    asgi_app = PooledWSGIApp(
+        wsgi_app,
+        max_workers=2,
+        spool_dir=instances_dir,
+        min_spool_free_bytes=0,
+    )
 
     # Use Starlette TestClient for the ASGI interface
     from starlette.testclient import TestClient
@@ -924,3 +934,997 @@ async def test_pooled_wsgi_app_get_response():
     # Cleanup temp dir
     import shutil
     shutil.rmtree(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_pooled_wsgi_app_streams_each_response_chunk_immediately(tmp_path):
+    """The first WSGI chunk reaches ASGI before the iterator finishes."""
+    import asyncio
+    import threading
+
+    from ns_hpc.file_server import PooledWSGIApp
+
+    allow_second_chunk = threading.Event()
+    first_chunk_sent = asyncio.Event()
+    sent_messages = []
+    released_before_first_chunk = False
+
+    def wsgi_app(environ, start_response):
+        start_response("200 OK", [("Content-Type", "application/octet-stream")])
+        yield b"first"
+        assert allow_second_chunk.wait(timeout=2)
+        yield b"second"
+
+    request_delivered = False
+
+    async def receive():
+        nonlocal request_delivered
+        if not request_delivered:
+            request_delivered = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        return await asyncio.Future()
+
+    async def send(message):
+        sent_messages.append(message)
+        if message["type"] == "http.response.body" and message.get("body") == b"first":
+            first_chunk_sent.set()
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/file.bin",
+        "root_path": "",
+        "query_string": b"",
+        "http_version": "1.1",
+        "scheme": "http",
+        "server": ("localhost", 8000),
+        "headers": [],
+    }
+    app = PooledWSGIApp(wsgi_app, max_workers=1, spool_dir=tmp_path, min_spool_free_bytes=0)
+    task = asyncio.create_task(app(scope, receive, send))
+
+    try:
+        await asyncio.wait_for(first_chunk_sent.wait(), timeout=1.0)
+    except TimeoutError:
+        released_before_first_chunk = True
+    finally:
+        allow_second_chunk.set()
+        await task
+
+    assert released_before_first_chunk is False
+    bodies = [m.get("body") for m in sent_messages if m["type"] == "http.response.body"]
+    assert bodies == [b"first", b"second", b""]
+
+
+@pytest.mark.asyncio
+async def test_pooled_wsgi_app_applies_backpressure_before_reading_next_chunk(tmp_path):
+    """A blocked ASGI send prevents the WSGI iterator advancing."""
+    import asyncio
+    import threading
+
+    from ns_hpc.file_server import PooledWSGIApp
+
+    first_send_started = asyncio.Event()
+    release_first_send = asyncio.Event()
+    second_chunk_requested = threading.Event()
+
+    def wsgi_app(environ, start_response):
+        start_response("200 OK", [("Content-Type", "application/octet-stream")])
+        yield b"first"
+        second_chunk_requested.set()
+        yield b"second"
+
+    request_delivered = False
+
+    async def receive():
+        nonlocal request_delivered
+        if not request_delivered:
+            request_delivered = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        return await asyncio.Future()
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body") == b"first":
+            first_send_started.set()
+            await release_first_send.wait()
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/file.bin",
+        "root_path": "",
+        "query_string": b"",
+        "http_version": "1.1",
+        "scheme": "http",
+        "server": ("localhost", 8000),
+        "headers": [],
+    }
+    app = PooledWSGIApp(
+        wsgi_app,
+        max_workers=1,
+        spool_dir=tmp_path,
+        min_spool_free_bytes=0,
+    )
+    task = asyncio.create_task(app(scope, receive, send))
+    await asyncio.wait_for(first_send_started.wait(), timeout=1)
+
+    assert second_chunk_requested.is_set() is False
+    release_first_send.set()
+    await task
+    assert second_chunk_requested.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_pooled_wsgi_app_spools_large_request_body_to_configured_disk(tmp_path):
+    """Large request bodies use the configured disk-backed WSGI input."""
+    import asyncio
+
+    from ns_hpc.file_server import PooledWSGIApp
+
+    chunk = b"x" * (32 * 1024)
+    chunks = [chunk, chunk, chunk]
+    observed = {}
+
+    def wsgi_app(environ, start_response):
+        stream = environ["wsgi.input"]
+        observed["rolled"] = getattr(stream, "_rolled", False)
+        observed["fd_path"] = os.readlink(f"/proc/self/fd/{stream.fileno()}")
+        observed["body"] = stream.read()
+        start_response("204 No Content", [("Content-Length", "0")])
+        return []
+
+    async def receive():
+        if not chunks:
+            return await asyncio.Future()
+        body = chunks.pop(0)
+        return {
+            "type": "http.request",
+            "body": body,
+            "more_body": bool(chunks),
+        }
+
+    sent_messages = []
+
+    async def send(message):
+        sent_messages.append(message)
+
+    scope = {
+        "type": "http",
+        "method": "PUT",
+        "path": "/upload.bin",
+        "root_path": "",
+        "query_string": b"",
+        "http_version": "1.1",
+        "scheme": "http",
+        "server": ("localhost", 8000),
+        "headers": [(b"content-length", str(3 * len(chunk)).encode())],
+    }
+    app = PooledWSGIApp(wsgi_app, max_workers=1, spool_dir=tmp_path, min_spool_free_bytes=0)
+    await app(scope, receive, send)
+
+    assert observed["rolled"] is True
+    assert observed["fd_path"].startswith(str(tmp_path))
+    assert observed["body"] == chunk * 3
+    assert sent_messages[-1] == {"type": "http.response.body", "body": b""}
+    assert app._reserved_spool_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_pooled_wsgi_app_stops_when_client_disconnects_during_upload(tmp_path):
+    """A disconnected upload must not invoke the WSGI application."""
+    from ns_hpc.file_server import PooledWSGIApp
+
+    wsgi_called = False
+    sent_messages = []
+
+    def wsgi_app(environ, start_response):
+        nonlocal wsgi_called
+        wsgi_called = True
+        start_response("200 OK", [])
+        return [b"unexpected"]
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent_messages.append(message)
+
+    scope = {
+        "type": "http",
+        "method": "PUT",
+        "path": "/upload.bin",
+        "root_path": "",
+        "query_string": b"",
+        "http_version": "1.1",
+        "scheme": "http",
+        "server": ("localhost", 8000),
+        "headers": [],
+    }
+    app = PooledWSGIApp(wsgi_app, max_workers=1, spool_dir=tmp_path, min_spool_free_bytes=0)
+    await app(scope, receive, send)
+
+    assert wsgi_called is False
+    assert sent_messages == []
+
+
+def test_pooled_wsgi_app_requires_explicit_spool_directory():
+    """The bridge must never silently fall back to tmpfs for large uploads."""
+    from ns_hpc.file_server import PooledWSGIApp
+
+    with pytest.raises(TypeError):
+        PooledWSGIApp(lambda environ, start_response: [])
+
+
+def test_pooled_wsgi_app_rejects_missing_spool_directory(tmp_path):
+    """Invalid spool storage fails at startup instead of during an upload."""
+    from ns_hpc.file_server import PooledWSGIApp
+
+    with pytest.raises(RuntimeError, match="spool directory does not exist"):
+        PooledWSGIApp(
+            lambda environ, start_response: [],
+            spool_dir=tmp_path / "missing",
+        )
+
+
+def test_pooled_wsgi_app_rejects_symlink_spool_directory(tmp_path):
+    """The spool path cannot redirect uploads outside managed storage."""
+    from ns_hpc.file_server import PooledWSGIApp
+
+    target = tmp_path / "target"
+    target.mkdir()
+    spool_link = tmp_path / "spool-link"
+    spool_link.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="must not be a symbolic link"):
+        PooledWSGIApp(
+            lambda environ, start_response: [],
+            spool_dir=spool_link,
+        )
+
+
+def test_pooled_wsgi_app_invalid_worker_count_does_not_leak_spool_fd(tmp_path):
+    """Constructor validation happens before retaining a spool directory fd."""
+    before = set(os.listdir("/proc/self/fd"))
+
+    from ns_hpc.file_server import PooledWSGIApp
+
+    with pytest.raises(ValueError, match="max_workers must be positive"):
+        PooledWSGIApp(
+            lambda environ, start_response: [],
+            max_workers=0,
+            max_inflight_requests=1,
+            spool_dir=tmp_path,
+        )
+
+    assert set(os.listdir("/proc/self/fd")) == before
+
+
+def test_pooled_wsgi_app_executor_failure_closes_spool_fd(tmp_path, monkeypatch):
+    """A post-open constructor failure closes the retained directory descriptor."""
+    import ns_hpc.file_server as file_server
+
+    before = set(os.listdir("/proc/self/fd"))
+
+    def fail_executor(*args, **kwargs):
+        raise RuntimeError("executor unavailable")
+
+    monkeypatch.setattr(file_server, "ThreadPoolExecutor", fail_executor)
+    with pytest.raises(RuntimeError, match="executor unavailable"):
+        file_server.PooledWSGIApp(
+            lambda environ, start_response: [],
+            max_workers=1,
+            spool_dir=tmp_path,
+        )
+
+    assert set(os.listdir("/proc/self/fd")) == before
+
+
+@pytest.mark.asyncio
+async def test_pooled_wsgi_app_preserves_spool_free_space(tmp_path, monkeypatch):
+    """Uploads are rejected before spool plus destination copies fill storage."""
+    import types
+
+    from ns_hpc.file_server import PooledWSGIApp
+
+    monkeypatch.setattr(
+        "ns_hpc.file_server.shutil.disk_usage",
+        lambda path: types.SimpleNamespace(free=119),
+    )
+    wsgi_called = False
+
+    def wsgi_app(environ, start_response):
+        nonlocal wsgi_called
+        wsgi_called = True
+        start_response("204 No Content", [])
+        return []
+
+    request_delivered = False
+
+    async def receive():
+        nonlocal request_delivered
+        assert not request_delivered
+        request_delivered = True
+        return {"type": "http.request", "body": b"0123456789", "more_body": False}
+
+    messages = []
+
+    async def send(message):
+        messages.append(message)
+
+    scope = {
+        "type": "http",
+        "method": "PUT",
+        "path": "/upload.bin",
+        "root_path": "",
+        "query_string": b"",
+        "http_version": "1.1",
+        "scheme": "http",
+        "server": ("localhost", 8000),
+        "headers": [(b"content-length", b"10")],
+    }
+    app = PooledWSGIApp(
+        wsgi_app,
+        max_workers=1,
+        spool_dir=tmp_path,
+        min_spool_free_bytes=100,
+    )
+    await app(scope, receive, send)
+
+    assert wsgi_called is False
+    assert messages[0]["status"] == 507
+    assert app._reserved_spool_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_pooled_wsgi_app_closes_iterator_when_client_send_fails(tmp_path):
+    """A failed ASGI send closes the WSGI iterator and its file resources."""
+    import asyncio
+    import threading
+
+    from ns_hpc.file_server import PooledWSGIApp
+
+    iterator_closed = threading.Event()
+
+    def wsgi_app(environ, start_response):
+        start_response("200 OK", [("Content-Type", "application/octet-stream")])
+        try:
+            yield b"first"
+            yield b"must-not-be-read"
+        finally:
+            iterator_closed.set()
+
+    request_delivered = False
+
+    async def receive():
+        nonlocal request_delivered
+        if not request_delivered:
+            request_delivered = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        return await asyncio.Future()
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body"):
+            raise ConnectionError("client disconnected")
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/file.bin",
+        "root_path": "",
+        "query_string": b"",
+        "http_version": "1.1",
+        "scheme": "http",
+        "server": ("localhost", 8000),
+        "headers": [],
+    }
+    app = PooledWSGIApp(wsgi_app, max_workers=1, spool_dir=tmp_path, min_spool_free_bytes=0)
+
+    with pytest.raises(ConnectionError, match="client disconnected"):
+        await app(scope, receive, send)
+
+    assert iterator_closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_pooled_wsgi_app_reraises_exc_info_after_response_started(tmp_path):
+    """WSGI cannot replace headers after the first response chunk was sent."""
+    import asyncio
+    import sys
+
+    from ns_hpc.file_server import PooledWSGIApp
+
+    def wsgi_app(environ, start_response):
+        start_response("200 OK", [("Content-Type", "text/plain")])
+        yield b"started"
+        try:
+            raise ValueError("late WSGI failure")
+        except ValueError:
+            start_response("500 Internal Server Error", [], sys.exc_info())
+
+    request_delivered = False
+
+    async def receive():
+        nonlocal request_delivered
+        if not request_delivered:
+            request_delivered = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        return await asyncio.Future()
+
+    async def send(message):
+        return None
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/file.txt",
+        "root_path": "",
+        "query_string": b"",
+        "http_version": "1.1",
+        "scheme": "http",
+        "server": ("localhost", 8000),
+        "headers": [],
+    }
+    app = PooledWSGIApp(wsgi_app, max_workers=1, spool_dir=tmp_path, min_spool_free_bytes=0)
+
+    with pytest.raises(ValueError, match="late WSGI failure"):
+        await app(scope, receive, send)
+
+
+@pytest.mark.asyncio
+async def test_pooled_wsgi_app_supports_wsgi_write_callable(tmp_path):
+    """The start_response return value implements PEP 3333 write()."""
+    import asyncio
+
+    from ns_hpc.file_server import PooledWSGIApp
+
+    def wsgi_app(environ, start_response):
+        write = start_response("200 OK", [("Content-Type", "text/plain")])
+        write(b"written")
+        return [b"yielded"]
+
+    request_delivered = False
+
+    async def receive():
+        nonlocal request_delivered
+        if not request_delivered:
+            request_delivered = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        return await asyncio.Future()
+
+    messages = []
+
+    async def send(message):
+        messages.append(message)
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/write-style",
+        "root_path": "",
+        "query_string": b"",
+        "http_version": "1.1",
+        "scheme": "http",
+        "server": ("localhost", 8000),
+        "headers": [],
+    }
+    app = PooledWSGIApp(wsgi_app, max_workers=1, spool_dir=tmp_path, min_spool_free_bytes=0)
+    await app(scope, receive, send)
+
+    bodies = [m.get("body") for m in messages if m["type"] == "http.response.body"]
+    assert bodies == [b"written", b"yielded", b""]
+
+
+@pytest.mark.asyncio
+async def test_pooled_wsgi_app_cancellation_stops_worker_before_next_chunk(tmp_path):
+    """Cancelling the ASGI task waits for the WSGI iterator to close."""
+    import asyncio
+    import threading
+
+    from ns_hpc.file_server import PooledWSGIApp
+
+    first_sent = asyncio.Event()
+    release_second = threading.Event()
+    iterator_closed = threading.Event()
+    bodies = []
+
+    def wsgi_app(environ, start_response):
+        start_response("200 OK", [("Content-Type", "application/octet-stream")])
+        try:
+            yield b"first"
+            assert release_second.wait(timeout=2)
+            yield b"second"
+        finally:
+            iterator_closed.set()
+
+    request_delivered = False
+
+    async def receive():
+        nonlocal request_delivered
+        if not request_delivered:
+            request_delivered = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        return await asyncio.Future()
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body"):
+            bodies.append(message["body"])
+            if message["body"] == b"first":
+                first_sent.set()
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/cancel",
+        "root_path": "",
+        "query_string": b"",
+        "http_version": "1.1",
+        "scheme": "http",
+        "server": ("localhost", 8000),
+        "headers": [],
+    }
+    app = PooledWSGIApp(wsgi_app, max_workers=1, spool_dir=tmp_path, min_spool_free_bytes=0)
+    task = asyncio.create_task(app(scope, receive, send))
+    await asyncio.wait_for(first_sent.wait(), timeout=1)
+
+    task.cancel()
+    await asyncio.sleep(0)
+    release_second.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert await asyncio.to_thread(iterator_closed.wait, 1)
+    assert bodies == [b"first"]
+
+
+@pytest.mark.asyncio
+async def test_pooled_wsgi_app_stops_on_response_disconnect_without_send_error(tmp_path):
+    """An http.disconnect stops iteration even when ASGI send does not fail."""
+    import asyncio
+    import threading
+
+    from ns_hpc.file_server import PooledWSGIApp
+
+    first_sent = asyncio.Event()
+    disconnect_allowed = asyncio.Event()
+    disconnect_consumed = asyncio.Event()
+    release_second = threading.Event()
+    bodies = []
+    receive_count = 0
+
+    def wsgi_app(environ, start_response):
+        start_response("200 OK", [("Content-Type", "application/octet-stream")])
+        yield b"first"
+        assert release_second.wait(timeout=2)
+        yield b"second"
+
+    async def receive():
+        nonlocal receive_count
+        receive_count += 1
+        if receive_count == 1:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await disconnect_allowed.wait()
+        disconnect_consumed.set()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body"):
+            bodies.append(message["body"])
+            if message["body"] == b"first":
+                first_sent.set()
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/disconnect",
+        "root_path": "",
+        "query_string": b"",
+        "http_version": "1.1",
+        "scheme": "http",
+        "server": ("localhost", 8000),
+        "headers": [],
+    }
+    app = PooledWSGIApp(wsgi_app, max_workers=1, spool_dir=tmp_path, min_spool_free_bytes=0)
+    task = asyncio.create_task(app(scope, receive, send))
+    await asyncio.wait_for(first_sent.wait(), timeout=1)
+
+    disconnect_allowed.set()
+    disconnect_was_observed = True
+    try:
+        await asyncio.wait_for(disconnect_consumed.wait(), timeout=0.2)
+    except TimeoutError:
+        disconnect_was_observed = False
+    finally:
+        release_second.set()
+        await task
+
+    assert disconnect_was_observed is True
+    assert bodies == [b"first"]
+
+
+@pytest.mark.asyncio
+async def test_pooled_wsgi_app_disconnect_interrupts_wsgi_input_reads(tmp_path):
+    """Disconnects stop WSGI upload processing before a response starts."""
+    import asyncio
+    import threading
+
+    from ns_hpc.file_server import PooledWSGIApp
+
+    first_read = threading.Event()
+    release_second_read = threading.Event()
+    disconnect_allowed = asyncio.Event()
+    disconnect_consumed = asyncio.Event()
+    second_read_happened = False
+    receive_count = 0
+
+    def wsgi_app(environ, start_response):
+        nonlocal second_read_happened
+        assert environ["wsgi.input"].read(5) == b"first"
+        first_read.set()
+        assert release_second_read.wait(timeout=2)
+        environ["wsgi.input"].read(6)
+        second_read_happened = True
+        start_response("204 No Content", [])
+        return []
+
+    async def receive():
+        nonlocal receive_count
+        receive_count += 1
+        if receive_count == 1:
+            return {
+                "type": "http.request",
+                "body": b"firstsecond",
+                "more_body": False,
+            }
+        await disconnect_allowed.wait()
+        disconnect_consumed.set()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        return None
+
+    scope = {
+        "type": "http",
+        "method": "PUT",
+        "path": "/upload.bin",
+        "root_path": "",
+        "query_string": b"",
+        "http_version": "1.1",
+        "scheme": "http",
+        "server": ("localhost", 8000),
+        "headers": [(b"content-length", b"11")],
+    }
+    app = PooledWSGIApp(
+        wsgi_app,
+        max_workers=1,
+        spool_dir=tmp_path,
+        min_spool_free_bytes=0,
+    )
+    task = asyncio.create_task(app(scope, receive, send))
+    assert await asyncio.to_thread(first_read.wait, 1)
+
+    disconnect_allowed.set()
+    disconnect_was_observed = True
+    try:
+        await asyncio.wait_for(disconnect_consumed.wait(), timeout=0.2)
+        await asyncio.sleep(0)
+    except TimeoutError:
+        disconnect_was_observed = False
+    finally:
+        release_second_read.set()
+        await task
+
+    assert disconnect_was_observed is True
+    assert second_read_happened is False
+
+
+@pytest.mark.asyncio
+async def test_pooled_wsgi_app_rejects_requests_above_admission_limit(tmp_path):
+    """The bridge rejects excess requests instead of building an unbounded queue."""
+    import asyncio
+    import threading
+
+    from ns_hpc.file_server import PooledWSGIApp
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+    calls = []
+
+    def wsgi_app(environ, start_response):
+        calls.append(environ["PATH_INFO"])
+        first_started.set()
+        assert release_first.wait(timeout=2)
+        start_response("204 No Content", [])
+        return []
+
+    app = PooledWSGIApp(
+        wsgi_app,
+        max_workers=1,
+        max_inflight_requests=1,
+        spool_dir=tmp_path,
+        min_spool_free_bytes=0,
+    )
+
+    def make_receive():
+        request_delivered = False
+
+        async def receive():
+            nonlocal request_delivered
+            if not request_delivered:
+                request_delivered = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            return await asyncio.Future()
+
+        return receive
+
+    def make_scope(path):
+        return {
+            "type": "http",
+            "method": "GET",
+            "path": path,
+            "root_path": "",
+            "query_string": b"",
+            "http_version": "1.1",
+            "scheme": "http",
+            "server": ("localhost", 8000),
+            "headers": [],
+        }
+
+    async def first_send(message):
+        return None
+
+    first_task = asyncio.create_task(
+        app(make_scope("/first"), make_receive(), first_send)
+    )
+    assert await asyncio.to_thread(first_started.wait, 1)
+
+    second_messages = []
+
+    async def second_send(message):
+        second_messages.append(message)
+
+    await app(make_scope("/second"), make_receive(), second_send)
+    release_first.set()
+    await first_task
+
+    assert calls == ["/first"]
+    assert second_messages[0]["status"] == 503
+
+
+@pytest.mark.asyncio
+async def test_pooled_wsgi_app_cancelled_queued_request_never_calls_wsgi(tmp_path):
+    """A queued worker checks cancellation before invoking application code."""
+    import asyncio
+    import threading
+
+    from ns_hpc.file_server import PooledWSGIApp
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_called = threading.Event()
+
+    def wsgi_app(environ, start_response):
+        if environ["PATH_INFO"] == "/first":
+            first_started.set()
+            assert release_first.wait(timeout=2)
+        else:
+            second_called.set()
+        start_response("204 No Content", [])
+        return []
+
+    app = PooledWSGIApp(
+        wsgi_app,
+        max_workers=1,
+        max_inflight_requests=2,
+        spool_dir=tmp_path,
+        min_spool_free_bytes=0,
+    )
+
+    def make_receive():
+        request_delivered = False
+
+        async def receive():
+            nonlocal request_delivered
+            if not request_delivered:
+                request_delivered = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            return await asyncio.Future()
+
+        return receive
+
+    def make_scope(path):
+        return {
+            "type": "http",
+            "method": "GET",
+            "path": path,
+            "root_path": "",
+            "query_string": b"",
+            "http_version": "1.1",
+            "scheme": "http",
+            "server": ("localhost", 8000),
+            "headers": [],
+        }
+
+    async def send(message):
+        return None
+
+    first_task = asyncio.create_task(app(make_scope("/first"), make_receive(), send))
+    assert await asyncio.to_thread(first_started.wait, 1)
+    second_task = asyncio.create_task(app(make_scope("/second"), make_receive(), send))
+    for _ in range(100):
+        if app._executor._work_queue.qsize() == 1:
+            break
+        await asyncio.sleep(0)
+    assert app._executor._work_queue.qsize() == 1
+
+    second_task.cancel()
+    await asyncio.sleep(0)
+    assert second_task.done() is False
+    second_task.cancel()
+    await asyncio.sleep(0)
+
+    third_messages = []
+
+    async def third_send(message):
+        third_messages.append(message)
+
+    await app(make_scope("/third"), make_receive(), third_send)
+    assert third_messages[0]["status"] == 503
+    assert app._inflight_requests == 2
+
+    release_first.set()
+
+    await first_task
+    with pytest.raises(asyncio.CancelledError):
+        await second_task
+    assert second_called.is_set() is False
+
+
+@pytest.mark.asyncio
+async def test_pooled_wsgi_app_worker_drain_resists_repeated_cancellation():
+    """Cleanup does not finish until the worker completes, despite repeated cancel()."""
+    import asyncio
+
+    from ns_hpc.file_server import PooledWSGIApp
+
+    loop = asyncio.get_running_loop()
+    worker_future = loop.create_future()
+    drain_task = asyncio.create_task(PooledWSGIApp._drain_worker(worker_future))
+    await asyncio.sleep(0)
+
+    drain_task.cancel()
+    await asyncio.sleep(0)
+    assert drain_task.done() is False
+    drain_task.cancel()
+    await asyncio.sleep(0)
+    assert drain_task.done() is False
+
+    worker_future.set_result(None)
+    assert await drain_task is True
+
+
+@pytest.mark.asyncio
+async def test_pooled_wsgi_app_uses_opened_spool_directory_after_path_replacement(tmp_path):
+    """Temporary files stay in the validated directory after pathname replacement."""
+    import asyncio
+
+    from ns_hpc.file_server import PooledWSGIApp
+
+    spool = tmp_path / "spool"
+    spool.mkdir(mode=0o700)
+    attacker = tmp_path / "attacker"
+    attacker.mkdir(mode=0o700)
+    trusted = tmp_path / "trusted-renamed"
+    observed = {}
+
+    def wsgi_app(environ, start_response):
+        stream = environ["wsgi.input"]
+        observed["fd_path"] = os.readlink(f"/proc/self/fd/{stream.fileno()}")
+        start_response("204 No Content", [])
+        return []
+
+    app = PooledWSGIApp(
+        wsgi_app,
+        max_workers=1,
+        spool_dir=spool,
+        min_spool_free_bytes=0,
+    )
+    spool.rename(trusted)
+    spool.symlink_to(attacker, target_is_directory=True)
+
+    delivered = False
+
+    async def receive():
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {
+                "type": "http.request",
+                "body": b"x" * (96 * 1024),
+                "more_body": False,
+            }
+        return await asyncio.Future()
+
+    async def send(message):
+        return None
+
+    scope = {
+        "type": "http",
+        "method": "PUT",
+        "path": "/upload.bin",
+        "root_path": "",
+        "query_string": b"",
+        "http_version": "1.1",
+        "scheme": "http",
+        "server": ("localhost", 8000),
+        "headers": [(b"content-length", str(96 * 1024).encode())],
+    }
+    await app(scope, receive, send)
+
+    assert observed["fd_path"].startswith(str(trusted))
+    assert not observed["fd_path"].startswith(str(attacker))
+
+
+@pytest.mark.asyncio
+async def test_pooled_wsgi_app_keeps_concurrent_requests_independent(tmp_path):
+    """A blocked WSGI request must not prevent another worker responding."""
+    import asyncio
+    import threading
+
+    from ns_hpc.file_server import PooledWSGIApp
+
+    slow_started = threading.Event()
+    release_slow = threading.Event()
+
+    def wsgi_app(environ, start_response):
+        start_response("200 OK", [("Content-Type", "text/plain")])
+        if environ["PATH_INFO"] == "/slow":
+            slow_started.set()
+            assert release_slow.wait(timeout=2)
+        return [environ["PATH_INFO"].encode()]
+
+    app = PooledWSGIApp(
+        wsgi_app,
+        max_workers=2,
+        spool_dir=tmp_path,
+        min_spool_free_bytes=0,
+    )
+
+    async def invoke(path):
+        request_delivered = False
+        messages = []
+
+        async def receive():
+            nonlocal request_delivered
+            if not request_delivered:
+                request_delivered = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            return await asyncio.Future()
+
+        async def send(message):
+            messages.append(message)
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": path,
+            "root_path": "",
+            "query_string": b"",
+            "http_version": "1.1",
+            "scheme": "http",
+            "server": ("localhost", 8000),
+            "headers": [],
+        }
+        await app(scope, receive, send)
+        return b"".join(
+            message.get("body", b"")
+            for message in messages
+            if message["type"] == "http.response.body"
+        )
+
+    slow_task = asyncio.create_task(invoke("/slow"))
+    assert await asyncio.to_thread(slow_started.wait, 1)
+    try:
+        assert await asyncio.wait_for(invoke("/fast"), timeout=1.0) == b"/fast"
+    finally:
+        release_slow.set()
+        await slow_task

@@ -17,11 +17,17 @@ import io
 import json
 import logging
 import os
+import shutil
+import stat
+import tempfile
+import threading
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, IO
 
+from asgiref.sync import AsyncToSync
 from wsgidav.dav_error import DAVError, HTTP_FORBIDDEN, HTTP_METHOD_NOT_ALLOWED
 from wsgidav.dav_provider import DAVCollection, DAVProvider
 from wsgidav.fs_dav_provider import FileResource as _FileResource
@@ -40,8 +46,10 @@ logger = logging.getLogger("ns-hpc")
 FileResource = _FileResource  # re-export
 
 
-def _build_environ(scope: Scope, body: bytes) -> dict[str, Any]:
+def _build_environ(scope: Scope, body: Any) -> dict[str, Any]:
     """Build a WSGI environ dict from an ASGI scope and request body."""
+    if isinstance(body, bytes):
+        body = io.BytesIO(body)
     script_name = scope.get("root_path", "").encode("utf8").decode("latin1")
     path_info = scope["path"].encode("utf8").decode("latin1")
     if path_info.startswith(script_name):
@@ -55,7 +63,7 @@ def _build_environ(scope: Scope, body: bytes) -> dict[str, Any]:
         "SERVER_PROTOCOL": f"HTTP/{scope['http_version']}",
         "wsgi.version": (1, 0),
         "wsgi.url_scheme": scope.get("scheme", "http"),
-        "wsgi.input": io.BytesIO(body),
+        "wsgi.input": body,
         "wsgi.errors": io.StringIO(),
         "wsgi.multithread": True,
         "wsgi.multiprocess": True,
@@ -84,66 +92,419 @@ def _build_environ(scope: Scope, body: bytes) -> dict[str, Any]:
     return environ
 
 
+class _StoppableInput:
+    """WSGI input wrapper that aborts blocking upload work after disconnect."""
+
+    def __init__(self, stream: IO[bytes], stop_event: threading.Event) -> None:
+        self._stream = stream
+        self._stop_event = stop_event
+
+    def _check_stopped(self) -> None:
+        if self._stop_event.is_set():
+            raise ConnectionAbortedError("ASGI request stopped")
+
+    def read(self, size: int = -1) -> bytes:
+        self._check_stopped()
+        return self._stream.read(size)
+
+    def readline(self, size: int = -1) -> bytes:
+        self._check_stopped()
+        return self._stream.readline(size)
+
+    def readlines(self, hint: int = -1) -> list[bytes]:
+        self._check_stopped()
+        return self._stream.readlines(hint)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> bytes:
+        line = self.readline()
+        if not line:
+            raise StopIteration
+        return line
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+
 class PooledWSGIApp:
     """ASGI wrapper around a WSGI app with a dedicated thread pool.
 
     Unlike ``asgiref.wsgi.WsgiToAsgi`` (which uses a ``thread_sensitive``
     single-thread executor), this wrapper uses a configurable thread pool so
     that concurrent requests — e.g. multiple WebDAV file transfers — don't
-    stall waiting for a slow I/O operation.
+    stall waiting for a slow I/O operation. Request bodies spool to the
+    explicitly configured disk directory after 64 KiB, and WSGI response
+    chunks are forwarded immediately with ASGI backpressure.
 
     Additionally, PROPFIND Depth defaults to ``"1"`` instead of
     ``"infinity"`` (RFC 4918) to avoid accidentally walking deep
     directory trees on NFS-backed mounts.
     """
 
-    def __init__(self, wsgi_app: Callable[..., Any], max_workers: int = 10) -> None:
+    def __init__(
+        self,
+        wsgi_app: Callable[..., Any],
+        *,
+        spool_dir: Path,
+        max_workers: int = 10,
+        max_inflight_requests: int | None = None,
+        min_spool_free_bytes: int = 1024**3,
+    ) -> None:
+        spool_path = Path(spool_dir)
+        if spool_path.is_symlink():
+            raise RuntimeError(
+                f"WebDAV spool directory must not be a symbolic link: {spool_path}"
+            )
+        if not spool_path.exists():
+            raise RuntimeError(f"WebDAV spool directory does not exist: {spool_path}")
+        if not spool_path.is_dir():
+            raise RuntimeError(f"WebDAV spool path is not a directory: {spool_path}")
+        spool_stat = spool_path.stat(follow_symlinks=False)
+        if spool_stat.st_uid != os.geteuid():
+            raise RuntimeError(
+                f"WebDAV spool directory is not owned by the service user: {spool_path}"
+            )
+        if stat.S_IMODE(spool_stat.st_mode) & 0o077:
+            raise RuntimeError(
+                f"WebDAV spool directory permissions must be 0700: {spool_path}"
+            )
+        if not os.access(spool_path, os.W_OK | os.X_OK):
+            raise RuntimeError(
+                f"WebDAV spool directory is not writable or traversable: {spool_path}"
+            )
+        if min_spool_free_bytes < 0:
+            raise ValueError("min_spool_free_bytes must be non-negative")
+        if max_workers < 1:
+            raise ValueError("max_workers must be positive")
+        if max_inflight_requests is None:
+            max_inflight_requests = 2 * max_workers
+        if max_inflight_requests < 1:
+            raise ValueError("max_inflight_requests must be positive")
+        try:
+            spool_fd = os.open(
+                spool_path,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            )
+        except OSError as exc:
+            raise RuntimeError(
+                f"Cannot securely open WebDAV spool directory: {spool_path}"
+            ) from exc
+        try:
+            opened_stat = os.fstat(spool_fd)
+            if opened_stat.st_uid != os.geteuid():
+                raise RuntimeError(
+                    f"WebDAV spool directory is not owned by the service user: {spool_path}"
+                )
+            if stat.S_IMODE(opened_stat.st_mode) & 0o077:
+                raise RuntimeError(
+                    f"WebDAV spool directory permissions must be 0700: {spool_path}"
+                )
+        except BaseException:
+            os.close(spool_fd)
+            raise
+        executor: ThreadPoolExecutor | None = None
+        try:
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            spool_fd_finalizer = weakref.finalize(self, os.close, spool_fd)
+        except BaseException:
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
+            os.close(spool_fd)
+            raise
+        assert executor is not None
         self._wsgi_app = wsgi_app
-        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._executor = executor
+        self._spool_fd = spool_fd
+        self._spool_fd_finalizer = spool_fd_finalizer
+        self._spool_dir = f"/proc/self/fd/{spool_fd}"
+        self._min_spool_free_bytes = min_spool_free_bytes
+        self._spool_reservation_lock = threading.Lock()
+        self._reserved_spool_bytes = 0
+        self._admission_lock = threading.Lock()
+        self._max_inflight_requests = max_inflight_requests
+        self._inflight_requests = 0
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        body = b""
-        more_body = True
-        while more_body:
+        if not self._try_admit_request():
+            await self._send_plain_error(send, 503, b"WebDAV server is busy")
+            return
+        try:
+            await self._handle_request(scope, receive, send)
+        finally:
+            self._release_request_admission()
+
+    async def _handle_request(
+        self, scope: Scope, receive: Receive, send: Send
+    ) -> None:
+        request_reserved_bytes = 0
+        declared_length = self._get_content_length(scope)
+        with tempfile.SpooledTemporaryFile(
+            max_size=64 * 1024,
+            mode="w+b",
+            dir=self._spool_dir,
+        ) as body:
+            try:
+                if declared_length:
+                    initial_reservation = 2 * declared_length
+                    if not self._reserve_spool_bytes(initial_reservation):
+                        await self._send_insufficient_storage(send)
+                        return
+                    request_reserved_bytes = initial_reservation
+
+                received_bytes = 0
+                more_body = True
+                while more_body:
+                    message = await receive()
+                    if message["type"] == "http.disconnect":
+                        return
+                    if message["type"] != "http.request":
+                        raise ValueError(
+                            f"WSGI bridge received unexpected ASGI message: {message['type']}"
+                        )
+                    chunk = message.get("body", b"")
+                    if chunk:
+                        if (
+                            declared_length is not None
+                            and received_bytes + len(chunk) > declared_length
+                        ):
+                            await self._send_plain_error(
+                                send, 400, b"Request body exceeds Content-Length"
+                            )
+                            return
+                        if declared_length is None:
+                            chunk_reservation = 2 * len(chunk)
+                            if not self._reserve_spool_bytes(chunk_reservation):
+                                await self._send_insufficient_storage(send)
+                                return
+                            request_reserved_bytes += chunk_reservation
+                        try:
+                            body.write(chunk)
+                        except BaseException:
+                            if declared_length is None:
+                                self._release_spool_bytes(2 * len(chunk))
+                                request_reserved_bytes -= 2 * len(chunk)
+                            raise
+                        self._release_spool_bytes(len(chunk))
+                        request_reserved_bytes -= len(chunk)
+                        received_bytes += len(chunk)
+                    more_body = message.get("more_body", False)
+                body.seek(0)
+
+                stop_event = threading.Event()
+                environ = _build_environ(scope, _StoppableInput(body, stop_event))
+                # Cap PROPFIND depth to 1 instead of infinity (RFC 4918 §9.1)
+                if environ.get("REQUEST_METHOD") == "PROPFIND":
+                    environ.setdefault("HTTP_DEPTH", "1")
+
+                loop = asyncio.get_running_loop()
+                sync_send = AsyncToSync(send)
+                worker_future = loop.run_in_executor(
+                    self._executor,
+                    self._run_wsgi_app,
+                    environ,
+                    sync_send,
+                    stop_event,
+                )
+                disconnect_task = asyncio.create_task(
+                    self._wait_for_disconnect(receive, stop_event)
+                )
+                try:
+                    done, _ = await asyncio.wait(
+                        (worker_future, disconnect_task),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if disconnect_task in done:
+                        try:
+                            await disconnect_task
+                        finally:
+                            stop_event.set()
+                            was_cancelled = await self._drain_worker(worker_future)
+                        if was_cancelled:
+                            raise asyncio.CancelledError
+                        return
+                    await asyncio.shield(worker_future)
+                except asyncio.CancelledError:
+                    stop_event.set()
+                    try:
+                        await self._drain_worker(worker_future)
+                    finally:
+                        raise
+                finally:
+                    disconnect_task.cancel()
+                    await asyncio.gather(disconnect_task, return_exceptions=True)
+            finally:
+                if request_reserved_bytes:
+                    self._release_spool_bytes(request_reserved_bytes)
+
+    def _try_admit_request(self) -> bool:
+        with self._admission_lock:
+            if self._inflight_requests >= self._max_inflight_requests:
+                return False
+            self._inflight_requests += 1
+            return True
+
+    def _release_request_admission(self) -> None:
+        with self._admission_lock:
+            self._inflight_requests -= 1
+
+    @staticmethod
+    async def _drain_worker(worker_future: asyncio.Future[Any]) -> bool:
+        """Wait for a worker despite repeated cancellation of the ASGI task."""
+        was_cancelled = False
+        while not worker_future.done():
+            try:
+                await asyncio.shield(worker_future)
+            except asyncio.CancelledError:
+                was_cancelled = True
+
+        if worker_future.cancelled():
+            return was_cancelled
+        try:
+            worker_future.result()
+        except Exception:
+            if not was_cancelled:
+                raise
+            logger.debug("WSGI worker failed while its ASGI task was cancelled", exc_info=True)
+        return was_cancelled
+
+    @staticmethod
+    def _get_content_length(scope: Scope) -> int | None:
+        for name, value in scope.get("headers", []):
+            if name.lower() == b"content-length":
+                try:
+                    length = int(value)
+                except ValueError:
+                    return None
+                return length if length >= 0 else None
+        return None
+
+    def _reserve_spool_bytes(self, size: int) -> bool:
+        """Atomically reserve bytes while preserving the configured free floor."""
+        with self._spool_reservation_lock:
+            free = shutil.disk_usage(self._spool_dir).free
+            required = (
+                self._reserved_spool_bytes
+                + size
+                + self._min_spool_free_bytes
+            )
+            if free < required:
+                return False
+            self._reserved_spool_bytes += size
+            return True
+
+    def _release_spool_bytes(self, size: int) -> None:
+        with self._spool_reservation_lock:
+            self._reserved_spool_bytes -= size
+
+    @staticmethod
+    async def _send_insufficient_storage(send: Send) -> None:
+        await PooledWSGIApp._send_plain_error(
+            send, 507, b"Insufficient storage for WebDAV upload"
+        )
+
+    @staticmethod
+    async def _send_plain_error(send: Send, status: int, body: bytes) -> None:
+        await send({
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                (b"content-type", b"text/plain; charset=utf-8"),
+                (b"content-length", str(len(body)).encode("ascii")),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    @staticmethod
+    async def _wait_for_disconnect(
+        receive: Receive, stop_event: threading.Event
+    ) -> None:
+        """Wait for the ASGI server to report that the response client left."""
+        while True:
             message = await receive()
-            body += message.get("body", b"")
-            more_body = message.get("more_body", False)
+            if message["type"] == "http.disconnect":
+                stop_event.set()
+                return
+            if message["type"] != "http.request":
+                raise ValueError(
+                    f"WSGI bridge received unexpected ASGI message: {message['type']}"
+                )
 
-        environ = _build_environ(scope, body)
-        # Cap PROPFIND depth to 1 instead of infinity (RFC 4918 §9.1)
-        if environ.get("REQUEST_METHOD") == "PROPFIND":
-            environ.setdefault("HTTP_DEPTH", "1")
-
-        loop = asyncio.get_running_loop()
-        start_event = asyncio.Event()
-        resp: dict[str, Any] = {}
+    def _run_wsgi_app(
+        self,
+        environ: dict[str, Any],
+        sync_send: Callable[[dict[str, Any]], Any],
+        stop_event: threading.Event,
+    ) -> None:
+        """Run WSGI in a worker, forwarding each response chunk immediately."""
+        response_start: dict[str, Any] | None = None
+        response_started = False
 
         def start_response(
             status: str, headers: list[tuple[str, str]], exc_info: Any = None
-        ) -> None:
-            if resp:
+        ) -> Callable[[bytes], None]:
+            nonlocal response_start
+            if exc_info is not None and response_started:
+                error = exc_info[1]
+                raise error.with_traceback(exc_info[2])
+            if response_start is not None and exc_info is None:
+                raise RuntimeError("start_response called twice without exc_info")
+            response_start = {
+                "type": "http.response.start",
+                "status": int(status.split()[0]),
+                "headers": [
+                    (key.encode("latin1"), value.encode("latin1"))
+                    for key, value in headers
+                ],
+            }
+            return write
+
+        def write(chunk: bytes) -> None:
+            nonlocal response_started
+            if stop_event.is_set():
+                raise ConnectionAbortedError("ASGI request stopped")
+            if response_start is None:
+                raise RuntimeError("write called before start_response")
+            if not response_started:
+                sync_send(response_start)
+                response_started = True
+            sync_send({
+                "type": "http.response.body",
+                "body": chunk,
+                "more_body": True,
+            })
+
+        iterator = None
+        try:
+            if stop_event.is_set():
                 return
-            resp["status"] = int(status.split()[0])
-            resp["headers"] = [
-                (k.encode("latin1"), v.encode("latin1")) for k, v in headers
-            ]
-            loop.call_soon_threadsafe(start_event.set)
+            iterator = iter(self._wsgi_app(environ, start_response))
+            while not stop_event.is_set():
+                try:
+                    chunk = next(iterator)
+                except StopIteration:
+                    break
+                if stop_event.is_set():
+                    break
+                if response_start is None:
+                    raise RuntimeError("WSGI app yielded before calling start_response")
+                write(chunk)
 
-        chunks_future = loop.run_in_executor(
-            self._executor,
-            lambda: list(self._wsgi_app(environ, start_response)),
-        )
-
-        await start_event.wait()
-        await send({
-            "type": "http.response.start",
-            "status": resp["status"],
-            "headers": resp["headers"],
-        })
-
-        for chunk in await chunks_future:
-            await send({"type": "http.response.body", "body": chunk, "more_body": True})
-        await send({"type": "http.response.body", "body": b""})
+            if stop_event.is_set():
+                return
+            if response_start is None:
+                raise RuntimeError("WSGI app returned without calling start_response")
+            if not response_started:
+                sync_send(response_start)
+            sync_send({"type": "http.response.body", "body": b""})
+        except ConnectionAbortedError:
+            if not stop_event.is_set():
+                raise
+        finally:
+            close = getattr(iterator, "close", None) if iterator is not None else None
+            if close is not None:
+                close()
 
 
 def _validate_within_root(target_path: Path, root_path: Path) -> None:

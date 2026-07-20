@@ -187,6 +187,20 @@ class SandboxDavProvider(DAVProvider):
         self._instances_dir = config.resolve_instances_dir()
         self._output_dir = self._instances_dir / "output"
         self._extras = config.dav.extras
+        for name, extra in self._extras.items():
+            root = Path(os.path.expanduser(extra.path)).resolve()
+            if not root.exists():
+                raise RuntimeError(
+                    f"WebDAV extra mount {name!r} does not exist: {root}"
+                )
+            if not root.is_dir():
+                raise RuntimeError(
+                    f"WebDAV extra mount {name!r} is not a directory: {root}"
+                )
+            if not os.access(root, os.R_OK | os.X_OK):
+                raise RuntimeError(
+                    f"WebDAV extra mount {name!r} is not readable or traversable: {root}"
+                )
         # wsgidav.fs_dav_provider resources expect these FilesystemProvider
         # attributes even though this provider routes virtual mount points.
         self.fs_opts = {"follow_symlinks": False}

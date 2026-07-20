@@ -174,6 +174,53 @@ def test_resolve_extra_mount(tmp_path):
     assert host_path == extra_dir / "data.csv"
     assert readonly is True
 
+
+def test_provider_rejects_missing_extra_mount_at_start(tmp_path):
+    instances_dir = tmp_path / "instances"
+    (instances_dir / "output").mkdir(parents=True)
+    missing = tmp_path / "missing-data"
+    cfg = _make_config(
+        instances_dir,
+        extras={"external-data": DavExtraMount(path=str(missing), ro=True)},
+    )
+
+    with pytest.raises(RuntimeError, match="external-data.*does not exist"):
+        _make_provider(cfg)
+
+
+def test_provider_rejects_extra_mount_that_is_not_directory(tmp_path):
+    instances_dir = tmp_path / "instances"
+    (instances_dir / "output").mkdir(parents=True)
+    extra_file = tmp_path / "data.txt"
+    extra_file.write_text("not a directory")
+    cfg = _make_config(
+        instances_dir,
+        extras={"external-data": DavExtraMount(path=str(extra_file), ro=True)},
+    )
+
+    with pytest.raises(RuntimeError, match="external-data.*not a directory"):
+        _make_provider(cfg)
+
+
+def test_provider_rejects_unreadable_extra_mount_at_start(tmp_path, monkeypatch):
+    instances_dir = tmp_path / "instances"
+    (instances_dir / "output").mkdir(parents=True)
+    extra_dir = tmp_path / "extra-data"
+    extra_dir.mkdir()
+    cfg = _make_config(
+        instances_dir,
+        extras={"external-data": DavExtraMount(path=str(extra_dir), ro=True)},
+    )
+    real_access = os.access
+    monkeypatch.setattr(
+        os,
+        "access",
+        lambda path, mode: False if Path(path) == extra_dir else real_access(path, mode),
+    )
+
+    with pytest.raises(RuntimeError, match="external-data.*not readable or traversable"):
+        _make_provider(cfg)
+
 def test_resolve_unknown_extra_mount(tmp_path):
     instances_dir = tmp_path / "instances"
     (instances_dir / "output").mkdir(parents=True)
